@@ -104,6 +104,49 @@ Spark/GB10 unified memory and does not label it as conventional VRAM. Generic
 services can combine an SSH status command with controller-side HTTP health
 and info probes; `info.extract` uses RFC 6901 JSON pointers.
 
+The TUI labels system memory as **RAM used** and shows used/total GiB plus the
+percentage. Its two-minute telemetry histories show current, minimum, and
+maximum values and dynamically scale small changes instead of rounding them
+away. Power history remains unavailable until a Shelly or another metering
+provider supplies watt readings.
+
+Multiple services can be attached to one device and are shown independently.
+For an OpenAI-compatible SGLang or LiteLLM model endpoint, extract the complete
+model array to display every advertised model:
+
+```yaml
+devices:
+  spark:
+    ssh: spark
+    services: [sglang, litellm]
+
+services:
+  sglang:
+    health:
+      url: http://spark:8000/health
+    info:
+      url: http://spark:8000/v1/models
+      headers:
+        Authorization: "${env:OPILIO_SGLANG_AUTH}"
+      extract:
+        models: /data
+  litellm:
+    health:
+      url: http://litellm:4000/health
+    info:
+      url: http://litellm:4000/v1/models
+      headers:
+        Authorization: "${env:OPILIO_LITELLM_AUTH}"
+      extract:
+        models: /data
+```
+
+Set each authorization variable to the complete HTTP header value, for example
+`Bearer ...`. The TUI recognizes strings and arrays of objects containing
+`id`, `model`, `model_name`, or `name`; JSON output retains the original typed
+response. Endpoints must be reachable from the controller. A remote `status`
+command can still monitor a service bound only to the managed device.
+
 ## Safe operation
 
 ```sh

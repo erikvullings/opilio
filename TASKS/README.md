@@ -27,3 +27,7 @@ Task details and resumable notes live in the linked files. The root
 - [ ] [0014 Native scheduling adapters](0014-native-scheduling-adapters.md)
 - [ ] [0015 Portable export and import](0015-portable-export-and-import.md)
 - [ ] [0016 Cross-platform hardening and release](0016-cross-platform-hardening-release.md)
+
+## Post-v1 refinements
+
+- [x] [0017 Improve TUI observability](0017-improve-tui-observability.md)

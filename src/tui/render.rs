@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::service::ServiceState;
 
-use super::{Dashboard, DashboardDevice, DeviceState, MetricSample, Overlay};
+use super::{Dashboard, DashboardDevice, DashboardService, DeviceState, MetricSample, Overlay};
 
 pub fn render(frame: &mut Frame<'_>, dashboard: &Dashboard) {
     let rows = Layout::default()
@@ -91,26 +91,29 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         frame.render_widget(Paragraph::new("No matching devices"), inner);
         return;
     };
+    let chart_height = if inner.height >= 24 { 5 } else { 4 };
+    let detail_height = (5 + device.services.len()).min(9) as u16;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(detail_height),
+            Constraint::Length(chart_height),
+            Constraint::Length(chart_height),
+            Constraint::Length(chart_height),
             Constraint::Min(1),
         ])
         .split(inner);
     frame.render_widget(Paragraph::new(detail_lines(device)), chunks[0]);
-    sparkline(frame, " RAM ", &device.ram_history, chunks[1], 100);
-    sparkline(frame, " GPU ", &device.gpu_history, chunks[2], 100);
-    let watt_max = device
-        .watts_history
-        .iter()
-        .map(|sample| sample.0.ceil() as u64)
-        .max()
-        .unwrap_or(1);
-    sparkline(frame, " Watts ", &device.watts_history, chunks[3], watt_max);
+    metric_history(frame, "RAM used", "%", &device.ram_history, chunks[1], None);
+    metric_history(frame, "GPU busy", "%", &device.gpu_history, chunks[2], None);
+    metric_history(
+        frame,
+        "Power draw",
+        " W",
+        &device.watts_history,
+        chunks[3],
+        Some("No samples - power meter required"),
+    );
     if let Some(error) = &device.recent_failure {
         frame.render_widget(
             Paragraph::new(format!("Recent failure: {error}"))
@@ -122,17 +125,7 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
 }
 
 fn detail_lines(device: &DashboardDevice) -> Vec<Line<'static>> {
-    let service = device.service_state.map_or_else(
-        || "—".to_owned(),
-        |state| {
-            format!(
-                "{} {}",
-                device.service_name.as_deref().unwrap_or("service"),
-                service_label(state)
-            )
-        },
-    );
-    vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(
                 device.name.clone(),
@@ -141,24 +134,54 @@ fn detail_lines(device: &DashboardDevice) -> Vec<Line<'static>> {
             Span::raw(format!("  {}", device.state.label())),
         ]),
         Line::from(format!("SSH     {}", device.ssh)),
-        Line::from(format!("RAM     {}", percent(device.ram_percent))),
-        Line::from(format!("GPU     {}", percent(device.gpu_percent))),
+        Line::from(format!("RAM used {}", memory_used(device))),
+        Line::from(format!("GPU busy {}", percent(device.gpu_percent))),
         Line::from(format!(
-            "Power   {}",
-            device
-                .watts
-                .map_or_else(|| "—".to_owned(), |watts| format!("{watts:.0} W"))
+            "Power draw {}",
+            device.watts.map_or_else(
+                || "— (power meter required)".to_owned(),
+                |watts| { format!("{watts:.1} W") }
+            )
         )),
-        Line::from(format!("Service {service}")),
-        Line::from(format!(
-            "Model   {}",
-            device.model.as_deref().unwrap_or("—")
-        )),
-    ]
+    ];
+    lines.extend(device.services.iter().map(service_line));
+    lines
 }
 
 fn percent(value: Option<f64>) -> String {
-    value.map_or_else(|| "—".to_owned(), |value| format!("{value:.0}%"))
+    value.map_or_else(|| "—".to_owned(), |value| format!("{value:.1}%"))
+}
+
+fn memory_used(device: &DashboardDevice) -> String {
+    match (
+        device.ram_used_bytes,
+        device.ram_total_bytes,
+        device.ram_percent,
+    ) {
+        (Some(used), Some(total), Some(percent)) => format!(
+            "{:.1} / {:.1} GiB ({percent:.1}%)",
+            gibibytes(used),
+            gibibytes(total)
+        ),
+        (_, _, percent) => self::percent(percent),
+    }
+}
+
+fn gibibytes(bytes: u64) -> f64 {
+    bytes as f64 / 1024_f64.powi(3)
+}
+
+fn service_line(service: &DashboardService) -> Line<'static> {
+    let models = if service.models.is_empty() {
+        String::new()
+    } else {
+        format!(" - {}", service.models.join(", "))
+    };
+    Line::from(format!(
+        "{:<12} {}{models}",
+        service.name,
+        service_label(service.state)
+    ))
 }
 
 fn service_label(state: ServiceState) -> &'static str {
@@ -182,25 +205,63 @@ fn state_style(state: DeviceState) -> Style {
     })
 }
 
-fn sparkline(
+fn metric_history(
     frame: &mut Frame<'_>,
     title: &str,
+    unit: &str,
     values: &std::collections::VecDeque<MetricSample>,
     area: Rect,
-    max: u64,
+    empty_message: Option<&str>,
 ) {
-    let values = values
+    let Some(current) = values.back().map(|sample| sample.0) else {
+        frame.render_widget(
+            Paragraph::new(empty_message.unwrap_or("No samples yet")).block(
+                Block::default()
+                    .title(format!(" {title} "))
+                    .borders(Borders::ALL),
+            ),
+            area,
+        );
+        return;
+    };
+    let minimum = values
         .iter()
-        .map(|sample| sample.0.max(0.0).round() as u64)
+        .map(|sample| sample.0)
+        .fold(f64::INFINITY, f64::min);
+    let maximum = values
+        .iter()
+        .map(|sample| sample.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let padding = ((maximum - minimum) * 0.1)
+        .max(current.abs() * 0.005)
+        .max(0.1);
+    let scale_min = (minimum - padding).max(0.0);
+    let scale_max = maximum + padding;
+    let scale_range = (scale_max - scale_min).max(f64::EPSILON);
+    let plotted = values
+        .iter()
+        .map(|sample| (((sample.0 - scale_min) / scale_range) * 1000.0).round() as u64)
         .collect::<Vec<_>>();
+    let window = format_window(values.len());
+    let title =
+        format!(" {title}  now {current:.1}{unit}  min {minimum:.1}  max {maximum:.1}  {window} ");
     frame.render_widget(
         Sparkline::default()
             .block(Block::default().title(title).borders(Borders::ALL))
-            .data(&values)
-            .max(max.max(1))
+            .data(&plotted)
+            .max(1000)
             .style(Style::default().fg(Color::Cyan)),
         area,
     );
+}
+
+fn format_window(samples: usize) -> String {
+    let seconds = samples * 2;
+    if seconds >= 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn render_overlay(frame: &mut Frame<'_>, dashboard: &Dashboard) {

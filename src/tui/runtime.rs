@@ -55,8 +55,8 @@ use crate::{
 use crate::ssh::{ControlMaster, ExecutionOptions, RemoteInvocation};
 
 use super::{
-    Dashboard, DashboardSample, DeviceState, Effect, Event, Key, Operation, PollKind, PollPolicy,
-    render,
+    Dashboard, DashboardSample, DashboardService, DeviceState, Effect, Event, Key, Operation,
+    PollKind, PollPolicy, render,
 };
 
 const EVENT_TICK: Duration = Duration::from_millis(100);
@@ -294,9 +294,11 @@ fn poll_device(
         device: name.to_owned(),
         state: DeviceState::Unknown,
         ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
         gpu_percent: None,
         watts: power.as_ref().and_then(|(_, watts, _)| *watts),
-        service: None,
+        services: None,
         error: power.as_ref().and_then(|(_, _, error)| error.clone()),
     };
     poll_remote(
@@ -591,19 +593,34 @@ fn poll_power(
 
 fn apply_telemetry(sample: &mut DashboardSample, telemetry: TelemetrySnapshot) {
     if let ProviderSnapshot::Available { data } = telemetry.system {
-        sample.ram_percent = memory_percent(&data);
+        if let Some(memory) = memory_usage(&data) {
+            sample.ram_percent = Some(memory.percent);
+            sample.ram_used_bytes = Some(memory.used_bytes);
+            sample.ram_total_bytes = Some(memory.total_bytes);
+        }
     }
     if let Some(ProviderSnapshot::Available { data }) = telemetry.nvidia {
         sample.gpu_percent = gpu_percent(&data);
     }
 }
 
-fn memory_percent(metrics: &SystemMetrics) -> Option<f64> {
+struct MemoryUsage {
+    percent: f64,
+    used_bytes: u64,
+    total_bytes: u64,
+}
+
+fn memory_usage(metrics: &SystemMetrics) -> Option<MemoryUsage> {
     match (&metrics.memory.total_bytes, &metrics.memory.available_bytes) {
         (Metric::Available { value: total }, Metric::Available { value: available })
             if *total > 0 =>
         {
-            Some((1.0 - (*available as f64 / *total as f64)) * 100.0)
+            let used = total.saturating_sub(*available);
+            Some(MemoryUsage {
+                percent: used as f64 / *total as f64 * 100.0,
+                used_bytes: used,
+                total_bytes: *total,
+            })
         }
         _ => None,
     }
@@ -620,17 +637,46 @@ fn gpu_percent(metrics: &NvidiaMetrics) -> Option<f64> {
 }
 
 fn apply_services(sample: &mut DashboardSample, observations: &[ServiceObservation]) {
-    let Some(observation) = observations.first() else {
-        return;
-    };
-    let model = observation
-        .fields
-        .get("model")
-        .and_then(|value| value.as_str())
-        .map(str::to_owned);
-    sample.service = Some((observation.name.clone(), observation.state, model));
-    if observation.state == ServiceState::Error {
-        sample.error = Some(format!("service `{}` reported an error", observation.name));
+    sample.services = Some(
+        observations
+            .iter()
+            .map(|observation| DashboardService {
+                name: observation.name.clone(),
+                state: observation.state,
+                models: observation
+                    .fields
+                    .iter()
+                    .filter(|(name, _)| matches!(name.as_str(), "model" | "models"))
+                    .flat_map(|(_, value)| model_names(value))
+                    .collect(),
+            })
+            .collect(),
+    );
+    let failures = observations
+        .iter()
+        .filter(|observation| observation.state == ServiceState::Error)
+        .map(|observation| observation.name.as_str())
+        .collect::<Vec<_>>();
+    if !failures.is_empty() {
+        sample.error = Some(format!(
+            "service{} {} reported an error",
+            if failures.len() == 1 { "" } else { "s" },
+            failures.join(", ")
+        ));
+    }
+}
+
+fn model_names(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::String(value) => vec![value.clone()],
+        serde_json::Value::Array(values) => values.iter().flat_map(model_names).collect(),
+        serde_json::Value::Object(values) => ["id", "model", "model_name", "name"]
+            .into_iter()
+            .find_map(|key| values.get(key))
+            .map_or_else(Vec::new, model_names),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Vec::new()
+        }
     }
 }
 
@@ -935,7 +981,7 @@ mod tests {
 
     use super::{
         CancellationToken, Config, ControlMasterPool, DeviceState, OpenSsh, RuntimeMessage,
-        SSH_STARTUP_TIMEOUT, control_path, mpsc, poll_device, send_operation_failures,
+        SSH_STARTUP_TIMEOUT, control_path, model_names, mpsc, poll_device, send_operation_failures,
     };
 
     struct FakeProcess {
@@ -1073,5 +1119,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(devices, ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn model_names_support_openai_compatible_model_arrays() {
+        let value = serde_json::json!([
+            {"id": "Qwen3-32B", "owned_by": "team"},
+            {"id": "Qwen3-0.6B", "owned_by": "team"}
+        ]);
+
+        assert_eq!(model_names(&value), ["Qwen3-32B", "Qwen3-0.6B"]);
     }
 }

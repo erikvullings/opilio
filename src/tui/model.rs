@@ -49,16 +49,23 @@ pub struct DashboardDevice {
     pub ssh: String,
     pub state: DeviceState,
     pub ram_percent: Option<f64>,
+    pub ram_used_bytes: Option<u64>,
+    pub ram_total_bytes: Option<u64>,
     pub gpu_percent: Option<f64>,
     pub watts: Option<f64>,
     pub ram_history: VecDeque<MetricSample>,
     pub gpu_history: VecDeque<MetricSample>,
     pub watts_history: VecDeque<MetricSample>,
-    pub service_name: Option<String>,
-    pub service_state: Option<ServiceState>,
-    pub model: Option<String>,
+    pub services: Vec<DashboardService>,
     pub recent_failure: Option<String>,
     pub busy: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardService {
+    pub name: String,
+    pub state: ServiceState,
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,9 +73,11 @@ pub struct DashboardSample {
     pub device: String,
     pub state: DeviceState,
     pub ram_percent: Option<f64>,
+    pub ram_used_bytes: Option<u64>,
+    pub ram_total_bytes: Option<u64>,
     pub gpu_percent: Option<f64>,
     pub watts: Option<f64>,
-    pub service: Option<(String, ServiceState, Option<String>)>,
+    pub services: Option<Vec<DashboardService>>,
     pub error: Option<String>,
 }
 
@@ -217,14 +226,14 @@ impl Dashboard {
                         ssh: device.ssh.clone(),
                         state: DeviceState::Unknown,
                         ram_percent: None,
+                        ram_used_bytes: None,
+                        ram_total_bytes: None,
                         gpu_percent: None,
                         watts: None,
                         ram_history: VecDeque::with_capacity(HISTORY_CAPACITY),
                         gpu_history: VecDeque::with_capacity(HISTORY_CAPACITY),
                         watts_history: VecDeque::with_capacity(HISTORY_CAPACITY),
-                        service_name: None,
-                        service_state: None,
-                        model: None,
+                        services: Vec::new(),
                         recent_failure: None,
                         busy: None,
                     },
@@ -455,6 +464,12 @@ impl Dashboard {
         if sample.ram_percent.is_some() {
             device.ram_percent = sample.ram_percent;
         }
+        if sample.ram_used_bytes.is_some() {
+            device.ram_used_bytes = sample.ram_used_bytes;
+        }
+        if sample.ram_total_bytes.is_some() {
+            device.ram_total_bytes = sample.ram_total_bytes;
+        }
         if sample.gpu_percent.is_some() {
             device.gpu_percent = sample.gpu_percent;
         }
@@ -464,10 +479,8 @@ impl Dashboard {
         push_metric(&mut device.ram_history, sample.ram_percent);
         push_metric(&mut device.gpu_history, sample.gpu_percent);
         push_metric(&mut device.watts_history, sample.watts);
-        if let Some((name, state, model)) = sample.service {
-            device.service_name = Some(name);
-            device.service_state = Some(state);
-            device.model = model;
+        if let Some(services) = sample.services {
+            device.services = services;
         }
         if let Some(error) = sample.error {
             device.recent_failure = Some(error);

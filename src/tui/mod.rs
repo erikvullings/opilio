@@ -5,8 +5,8 @@ mod render;
 mod runtime;
 
 pub use model::{
-    Dashboard, DashboardDevice, DashboardSample, DeviceState, Effect, Event, Key, MetricSample,
-    Operation, Overlay, PollKind, PollPolicy,
+    Dashboard, DashboardDevice, DashboardSample, DashboardService, DeviceState, Effect, Event, Key,
+    MetricSample, Operation, Overlay, PollKind, PollPolicy,
 };
 pub use render::{render, render_to_string};
 pub use runtime::run;

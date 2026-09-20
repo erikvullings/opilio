@@ -4,8 +4,8 @@ use opilio::{
     config::Config,
     service::ServiceState,
     tui::{
-        Dashboard, DashboardSample, DeviceState, Effect, Event, Key, MetricSample, Operation,
-        Overlay, PollKind, PollPolicy, render_to_string,
+        Dashboard, DashboardSample, DashboardService, DeviceState, Effect, Event, Key,
+        MetricSample, Operation, Overlay, PollKind, PollPolicy, render_to_string,
     },
 };
 
@@ -149,16 +149,31 @@ fn telemetry_samples_are_bounded_and_keep_service_and_failure_details() {
             device: "alpha".into(),
             state: DeviceState::Running,
             ram_percent: Some(value as f64),
+            ram_used_bytes: Some(64 * 1024_u64.pow(3)),
+            ram_total_bytes: Some(128 * 1024_u64.pow(3)),
             gpu_percent: Some((value / 2) as f64),
             watts: Some(100.0 + value as f64),
-            service: Some(("llm".into(), ServiceState::Loading, Some("Qwen".into()))),
+            services: Some(vec![
+                DashboardService {
+                    name: "sglang-main".into(),
+                    state: ServiceState::Ready,
+                    models: vec!["Qwen3-32B".into()],
+                },
+                DashboardService {
+                    name: "sglang-small".into(),
+                    state: ServiceState::Loading,
+                    models: vec!["Qwen3-0.6B".into()],
+                },
+            ]),
             error: (value == 79).then(|| "probe failed".into()),
         }));
     }
     let device = dashboard.device("alpha").unwrap();
     assert_eq!(device.ram_history.len(), 60);
     assert_eq!(device.ram_history.front(), Some(&MetricSample(20.0)));
-    assert_eq!(device.model.as_deref(), Some("Qwen"));
+    assert_eq!(device.services.len(), 2);
+    assert_eq!(device.services[0].models, ["Qwen3-32B"]);
+    assert!(render_to_string(&dashboard, 120, 30).contains("2m"));
     assert!(
         device
             .recent_failure
@@ -208,23 +223,44 @@ fn stable_renderer_shows_master_detail_status_and_shortcuts() {
     dashboard.update(Event::PollCompleted(DashboardSample {
         device: "alpha".into(),
         state: DeviceState::Running,
-        ram_percent: Some(72.0),
-        gpu_percent: Some(87.0),
-        watts: Some(118.0),
-        service: Some(("llm".into(), ServiceState::Ready, Some("Qwen".into()))),
+        ram_percent: Some(72.4),
+        ram_used_bytes: Some(92 * 1024_u64.pow(3)),
+        ram_total_bytes: Some(128 * 1024_u64.pow(3)),
+        gpu_percent: Some(87.6),
+        watts: None,
+        services: Some(vec![
+            DashboardService {
+                name: "sglang-main".into(),
+                state: ServiceState::Ready,
+                models: vec!["Qwen3-32B".into()],
+            },
+            DashboardService {
+                name: "litellm".into(),
+                state: ServiceState::Ready,
+                models: vec!["Qwen3-32B".into(), "Qwen3-0.6B".into()],
+            },
+        ]),
         error: None,
     }));
-    let rendered = render_to_string(&dashboard, 100, 24);
+    let rendered = render_to_string(&dashboard, 120, 30);
     for expected in [
         "Sites / Groups",
         "Devices",
         "Details",
         "alpha",
         "running",
-        "RAM",
-        "GPU",
-        "118 W",
-        "Qwen",
+        "RAM used",
+        "92.0 / 128.0 GiB",
+        "GPU busy",
+        "now 72.4%",
+        "min 72.4",
+        "2s",
+        "sglang-main",
+        "Qwen3-32B",
+        "litellm",
+        "ready",
+        "Qwen3-0.6B",
+        "power meter required",
         "[o] On",
         "[?] Help",
     ] {
@@ -233,6 +269,15 @@ fn stable_renderer_shows_master_detail_status_and_shortcuts() {
             "missing {expected:?}\n{rendered}"
         );
     }
+}
+
+#[test]
+fn renderer_remains_safe_at_a_compact_terminal_size() {
+    let dashboard = Dashboard::from_config(&config());
+    let rendered = render_to_string(&dashboard, 80, 20);
+
+    assert!(rendered.contains("Details"));
+    assert!(rendered.contains("RAM used"));
 }
 
 #[test]
