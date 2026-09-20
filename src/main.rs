@@ -8,7 +8,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("opilio: {error}");
-            ExitCode::FAILURE
+            ExitCode::from(error.exit_code())
         }
     }
 }

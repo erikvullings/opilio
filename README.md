@@ -15,7 +15,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | Task | Status | Depends on | Outcome |
 |---|---|---|---|
 | [0001 Bootstrap Rust application](TASKS/0001-bootstrap-rust-application.md) | done | — | Buildable cross-platform CLI/library skeleton |
-| [0002 Load and validate configuration](TASKS/0002-load-and-validate-configuration.md) | open | 0001 | Strict portable YAML + target model |
+| [0002 Load and validate configuration](TASKS/0002-load-and-validate-configuration.md) | done | 0001 | Strict portable YAML + target model |
 | [0003 Status and structured output](TASKS/0003-status-and-structured-output.md) | open | 0002 | `status`, target resolution, stable JSON/exit codes |
 | [0004 OpenSSH execution layer](TASKS/0004-openssh-execution-layer.md) | open | 0002 | System SSH, commands/exec, multiplexing seam |
 | [0005 Named actions and aliases](TASKS/0005-named-actions-and-aliases.md) | open | 0003, 0004 | Safe named remote actions + one-op aliases |
@@ -31,7 +31,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `1 / 16` tasks done.
+**Overall status:** implementation in progress. `2 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -57,3 +57,22 @@ cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
+
+## Configuration
+
+Opilio loads strict YAML from `--config <path>`, then `OPILIO_CONFIG`, then the
+platform default documented in the [v1 specification](docs/OPILIO_V1_SPEC.md).
+Start from [`examples/config.yaml`](examples/config.yaml); secrets must remain
+environment references such as `${env:OPILIO_SHELLY_HOME_PASSWORD}`.
+
+```sh
+opilio config path
+opilio config check
+opilio device ls
+opilio group ls
+opilio site ls
+opilio action ls
+```
+
+`config check` only parses and statically validates configuration. It performs
+no network, process, or hardware probes.

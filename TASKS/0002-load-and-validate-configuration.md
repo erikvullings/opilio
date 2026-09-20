@@ -1,6 +1,6 @@
 # 0002 — Load and validate configuration
 
-**Status:** open  
+**Status:** done
 **Depends on:** 0001  
 **Spec:** `docs/OPILIO_V1_SPEC.md`
 
@@ -39,16 +39,20 @@ This is a resumable Opilio v1 task. Read the product spec and `AGENTS.md` before
 
 ## Progress
 
-- [ ] Task picked up; status changed to `in-progress` in this file and root README.
-- [ ] Implementation completed.
-- [ ] Focused tests pass.
-- [ ] Full relevant test suite/lints pass.
-- [ ] Documentation/examples updated if behavior is user-visible.
-- [ ] Status changed to `done` and root README dashboard updated.
+- [x] Task picked up; status changed to `in-progress` in this file and root README.
+- [x] Implementation completed.
+- [x] Focused tests pass.
+- [x] Full relevant test suite/lints pass.
+- [x] Documentation/examples updated if behavior is user-visible.
+- [x] Status changed to `done` and root README dashboard updated.
 
 ## Validation
 
-Record commands/tests and concise results here before marking done.
+- `cargo test --test config --test cli_config --quiet` — 14 task-focused tests passed.
+- `cargo test --all-targets --all-features` — full suite passed (16 tests).
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- `cargo fmt --check` — passed.
+- All six required CLI commands smoke-tested against `examples/config.yaml`.
 
 ## Blockers / decisions needed
 
@@ -56,4 +60,8 @@ None currently.
 
 ## Notes / handoff
 
-Add anything a fresh agent needs to resume this task.
+- 2026-09-20 Copilot: Added strict typed YAML models and validation, portable
+  path precedence, redacted environment secret references, target/action
+  resolution, configuration/list CLI commands, and a validated sample.
+  Verified 14 focused tests, the 16-test full suite, strict clippy, formatting,
+  and command-line smoke tests. No known limitations within task scope.

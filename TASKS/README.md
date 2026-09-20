@@ -6,7 +6,7 @@ Task details and resumable notes live in the linked files. The root
 ## Milestone 1 — Useful CLI
 
 - [x] [0001 Bootstrap Rust application](0001-bootstrap-rust-application.md)
-- [ ] [0002 Load and validate configuration](0002-load-and-validate-configuration.md)
+- [x] [0002 Load and validate configuration](0002-load-and-validate-configuration.md)
 - [ ] [0003 Status and structured output](0003-status-and-structured-output.md)
 - [ ] [0004 OpenSSH execution layer](0004-openssh-execution-layer.md)
 - [ ] [0005 Named actions and aliases](0005-named-actions-and-aliases.md)

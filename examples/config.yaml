@@ -1,0 +1,67 @@
+sites:
+  home:
+    label: Home
+  lab:
+    label: Lab via VPN
+
+devices:
+  spark-home:
+    site: home
+    ssh: spark-home
+    groups: [sparks]
+    power:
+      type: shelly
+      host: shelly-spark-home
+      auth:
+        password: "${env:OPILIO_SHELLY_HOME_PASSWORD}"
+    shutdown:
+      command: sudo shutdown -h now
+      cut_power: true
+      timeout: 2m
+    telemetry:
+      provider: nvidia
+    services: [llm]
+  spark-2:
+    site: lab
+    ssh: spark-2
+    groups: [sparks, sglang]
+    power:
+      type: wol
+      mac: "00:11:22:33:44:55"
+
+groups:
+  sparks:
+    devices: [spark-home, spark-2]
+  sglang:
+    devices: [spark-2]
+
+actions:
+  update:
+    command: sudo apt update && sudo apt upgrade -y
+    timeout: 30m
+  start-llm:
+    cwd: ~/llm/vllm
+    exec:
+      program: ./start.sh
+      args: []
+    timeout: 2m
+    overrides:
+      sglang:
+        command: systemctl start sglang
+      spark-home:
+        command: docker start vllm
+
+aliases:
+  shutdown-sparks:
+    operation: off
+    target: sparks
+    parallel: 4
+
+services:
+  llm:
+    status:
+      command: docker inspect -f '{{.State.Status}}' vllm
+    health:
+      url: http://localhost:8000/health
+    info:
+      url: http://localhost:8000/v1/models
