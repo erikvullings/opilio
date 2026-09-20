@@ -75,6 +75,7 @@ fn valid_portable_config_loads_and_resolves_references() {
     let config = Config::from_yaml(VALID_CONFIG).expect("valid config");
 
     assert_eq!(config.devices().len(), 2);
+    assert_eq!(config.devices()["alpha"].shell, "/bin/sh");
     assert_eq!(
         config
             .resolve_action("start", "alpha")
@@ -104,6 +105,15 @@ fn valid_portable_config_loads_and_resolves_references() {
             .command(),
         Some("sudo apt update")
     );
+}
+
+#[test]
+fn device_remote_shell_is_explicitly_configurable() {
+    let config =
+        Config::from_yaml(&VALID_CONFIG.replace("ssh: alpha", "ssh: alpha\n    shell: /bin/bash"))
+            .expect("custom shell");
+
+    assert_eq!(config.devices()["alpha"].shell, "/bin/bash");
 }
 
 #[test]

@@ -149,6 +149,9 @@ pub struct Device {
     pub label: Option<String>,
     pub site: Option<String>,
     pub ssh: String,
+    /// Explicit remote shell for `command` actions.
+    #[serde(default = "default_remote_shell")]
+    pub shell: String,
     #[serde(default)]
     pub groups: Vec<String>,
     pub power: Option<PowerProvider>,
@@ -156,6 +159,10 @@ pub struct Device {
     pub telemetry: Option<Telemetry>,
     #[serde(default)]
     pub services: Vec<String>,
+}
+
+fn default_remote_shell() -> String {
+    "/bin/sh".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

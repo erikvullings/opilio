@@ -8,6 +8,7 @@ devices:
   spark-home:
     site: home
     ssh: spark-home
+    shell: /bin/sh
     groups: [sparks]
     power:
       type: shelly

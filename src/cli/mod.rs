@@ -18,6 +18,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Open an interactive system OpenSSH session to exactly one device.
+    Ssh {
+        /// Configured Opilio device name.
+        device: String,
+    },
     /// Show configured status for a device, group, site, or all devices.
     Status {
         /// Device, group, site, or `all`; defaults to all devices.

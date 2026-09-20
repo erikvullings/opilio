@@ -172,6 +172,11 @@ impl Config {
                     "device `{device_name}` has an empty SSH target"
                 )));
             }
+            if device.shell.trim().is_empty() {
+                return Err(validation(format!(
+                    "device `{device_name}` has an empty remote shell"
+                )));
+            }
             reject_duplicates(
                 &device.groups,
                 &format!("device `{device_name}` group membership"),

@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use crate::{
     cli::{Cli, Command, ConfigCommand, ListCommand},
     config::{Config, ConfigError, config_path},
+    ssh::{InteractiveSsh, OpenSsh, SshError},
     status::{
         ConfiguredStatusSource, ExitStatus, StatusError, StatusRequest, StatusSource,
         collect_status, write_human, write_json,
@@ -28,6 +29,24 @@ pub fn execute_with_status_source(
     output: &mut dyn Write,
     status_source: &dyn StatusSource,
 ) -> Result<ExitStatus, AppError> {
+    execute_with_adapters(cli, output, status_source, None)
+}
+
+/// Executes a parsed invocation with an injectable interactive OpenSSH boundary.
+pub fn execute_with_ssh(
+    cli: Cli,
+    output: &mut dyn Write,
+    ssh: &dyn InteractiveSsh,
+) -> Result<ExitStatus, AppError> {
+    execute_with_adapters(cli, output, &ConfiguredStatusSource, Some(ssh))
+}
+
+fn execute_with_adapters(
+    cli: Cli,
+    output: &mut dyn Write,
+    status_source: &dyn StatusSource,
+    ssh: Option<&dyn InteractiveSsh>,
+) -> Result<ExitStatus, AppError> {
     let Some(command) = cli.command else {
         tui::run().map_err(AppError::Io)?;
         return Ok(ExitStatus::Success);
@@ -35,6 +54,24 @@ pub fn execute_with_status_source(
     let path = config_path(cli.config)?;
 
     match command {
+        Command::Ssh { device } => {
+            let config = Config::load(&path)?;
+            let configured_device = config.devices().get(&device).ok_or_else(|| {
+                AppError::SshTarget(format!(
+                    "`{device}` is not a device; `opilio ssh` rejects groups and sites"
+                ))
+            })?;
+            let exit_code = if let Some(ssh) = ssh {
+                ssh.interactive(&configured_device.ssh)?
+            } else {
+                OpenSsh::system()?.interactive(&configured_device.ssh)?
+            };
+            Ok(if exit_code == 0 {
+                ExitStatus::Success
+            } else {
+                ExitStatus::Failed
+            })
+        }
         Command::Status {
             target,
             json,
@@ -114,6 +151,10 @@ pub enum AppError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Status(#[from] StatusError),
+    #[error(transparent)]
+    Ssh(#[from] SshError),
+    #[error("invalid SSH target: {0}")]
+    SshTarget(String),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 }
@@ -121,8 +162,10 @@ pub enum AppError {
 impl AppError {
     pub const fn exit_code(&self) -> u8 {
         match self {
-            Self::Config(_) | Self::Status(_) => ExitStatus::ConfigOrUsage.code(),
-            Self::Io(_) => 1,
+            Self::Config(_) | Self::Status(_) | Self::SshTarget(_) => {
+                ExitStatus::ConfigOrUsage.code()
+            }
+            Self::Ssh(_) | Self::Io(_) => 1,
         }
     }
 }
