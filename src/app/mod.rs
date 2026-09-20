@@ -184,7 +184,8 @@ fn execute_with_adapters(
     history: Option<HistoryContext<'_>>,
 ) -> Result<ExitStatus, AppError> {
     let Some(command) = cli.command else {
-        tui::run().map_err(AppError::Io)?;
+        let path = config_path(cli.config)?;
+        tui::run(Config::load(&path)?).map_err(AppError::Io)?;
         return Ok(ExitStatus::Success);
     };
     let path = config_path(cli.config)?;

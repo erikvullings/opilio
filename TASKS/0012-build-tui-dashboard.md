@@ -1,6 +1,6 @@
 # 0012 — Build TUI dashboard
 
-**Status:** open  
+**Status:** done
 **Depends on:** 0008, 0009, 0010, 0011  
 **Spec:** `docs/OPILIO_V1_SPEC.md`
 
@@ -40,16 +40,24 @@ This is a resumable Opilio v1 task. Read the product spec and `AGENTS.md` before
 
 ## Progress
 
-- [ ] Task picked up; status changed to `in-progress` in this file and root README.
-- [ ] Implementation completed.
-- [ ] Focused tests pass.
-- [ ] Full relevant test suite/lints pass.
-- [ ] Documentation/examples updated if behavior is user-visible.
-- [ ] Status changed to `done` and root README dashboard updated.
+- [x] Task picked up; status changed to `in-progress` in this file and root README.
+- [x] Implementation completed.
+- [x] Focused tests pass.
+- [x] Full relevant test suite/lints pass.
+- [x] Documentation/examples updated if behavior is user-visible.
+- [x] Status changed to `done` and root README dashboard updated.
 
 ## Validation
 
-Record commands/tests and concise results here before marking done.
+- `cargo test --test tui --quiet` — 7 focused public-interface tests passed,
+  covering pure reducer navigation/filtering, operation safety dialogs, action
+  selection, bounded telemetry history, site backoff/recovery, state labels,
+  and deterministic `TestBackend` rendering.
+- `cargo check --all-targets --all-features` — passed without warnings.
+- `cargo fmt --all -- --check` — passed.
+- `cargo test --all-targets --all-features --quiet` — full suite passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Noninteractive smoke invocation — rejected cleanly without opening a terminal.
 
 ## Blockers / decisions needed
 
@@ -57,4 +65,12 @@ None currently.
 
 ## Notes / handoff
 
-Add anything a fresh agent needs to resume this task.
+- 2026-09-20 Copilot: Added a Ratatui/crossterm master/detail dashboard with
+  sites/groups, filtered device navigation, live status/detail/service views,
+  bounded RAM/GPU/watt sparklines, recent failures, help/action/confirmation
+  overlays, shared lifecycle/action/SSH APIs, TUI-sourced history, background
+  polling and operations, 2 s telemetry/7 s service cadence, 10/20/30 s site
+  backoff with recovery/manual retry, temporary OpenSSH ControlMasters, and
+  terminal/process cleanup. Verified 7 focused tests plus full check, format,
+  test, strict Clippy, and noninteractive smoke validation; no known
+  task-scope limitations.

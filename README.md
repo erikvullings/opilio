@@ -25,13 +25,13 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0009 System and NVIDIA telemetry](TASKS/0009-system-and-nvidia-telemetry.md) | done | 0004 | CPU/RAM/GPU + DGX Spark UMA-aware telemetry |
 | [0010 Generic service health](TASKS/0010-generic-service-health.md) | done | 0004 | Generic health/status/info incl. LLM model name |
 | [0011 Operation history and logging](TASKS/0011-operation-history-and-logging.md) | done | 0005, 0008 | Rotating JSONL history + bounded failure output |
-| [0012 Build the TUI dashboard](TASKS/0012-build-tui-dashboard.md) | open | 0008, 0009, 0010, 0011 | Keyboard-first live fleet dashboard |
+| [0012 Build the TUI dashboard](TASKS/0012-build-tui-dashboard.md) | done | 0008, 0009, 0010, 0011 | Keyboard-first live fleet dashboard |
 | [0013 Diagnostics and doctor](TASKS/0013-diagnostics-and-doctor.md) | open | 0006, 0007, 0009, 0010 | Static config check + runtime diagnostics |
 | [0014 Native scheduling adapters](TASKS/0014-native-scheduling-adapters.md) | open | 0005, 0011 | Linux/macOS/Windows schedule ls/add/rm |
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `11 / 16` tasks done.
+**Overall status:** implementation in progress. `12 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -85,6 +85,14 @@ opilio ssh <device>
 opilio history [device|group|site|all] [--json]
 opilio history show <id> [--json]
 ```
+
+Running `opilio` without a subcommand opens the interactive fleet dashboard.
+Use arrows or `h/j/k/l` to move between sites/groups and devices, `/` to
+filter, `R` to refresh, `o`/`x`/`r` for lifecycle operations, `a` for named
+actions, `s` for a system-OpenSSH handoff, and `?` for help. Collection
+operations require confirmation. Polls and long operations run off the render
+loop; unreachable sites back off automatically and manual refresh retries
+immediately. Telemetry graphs are intentionally memory-only.
 
 `config check` only parses and statically validates configuration. It performs
 no network, process, or hardware probes.

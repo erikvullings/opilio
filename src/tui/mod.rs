@@ -1,11 +1,12 @@
-//! Terminal user interface entry point.
+//! Keyboard-first dashboard, with pure state updates kept separate from terminal I/O.
 
-use std::io::{self, Write};
+mod model;
+mod render;
+mod runtime;
 
-/// Starts the terminal user interface.
-pub fn run() -> io::Result<()> {
-    writeln!(
-        io::stdout().lock(),
-        "Opilio TUI is not implemented yet. Run `opilio --help` for available commands."
-    )
-}
+pub use model::{
+    Dashboard, DashboardDevice, DashboardSample, DeviceState, Effect, Event, Key, MetricSample,
+    Operation, Overlay, PollKind, PollPolicy,
+};
+pub use render::{render, render_to_string};
+pub use runtime::run;
