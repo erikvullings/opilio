@@ -23,7 +23,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0007 Wake-on-LAN provider](TASKS/0007-wake-on-lan-provider.md) | done | 0003 | WoL power-on support |
 | [0008 Safe lifecycle operations](TASKS/0008-safe-lifecycle-operations.md) | done | 0004, 0006, 0007 | on/off/reboot/power-cycle safety semantics |
 | [0009 System and NVIDIA telemetry](TASKS/0009-system-and-nvidia-telemetry.md) | done | 0004 | CPU/RAM/GPU + DGX Spark UMA-aware telemetry |
-| [0010 Generic service health](TASKS/0010-generic-service-health.md) | open | 0004 | Generic health/status/info incl. LLM model name |
+| [0010 Generic service health](TASKS/0010-generic-service-health.md) | done | 0004 | Generic health/status/info incl. LLM model name |
 | [0011 Operation history and logging](TASKS/0011-operation-history-and-logging.md) | open | 0005, 0008 | Rotating JSONL history + bounded failure output |
 | [0012 Build the TUI dashboard](TASKS/0012-build-tui-dashboard.md) | open | 0008, 0009, 0010, 0011 | Keyboard-first live fleet dashboard |
 | [0013 Diagnostics and doctor](TASKS/0013-diagnostics-and-doctor.md) | open | 0006, 0007, 0009, 0010 | Static config check + runtime diagnostics |
@@ -31,7 +31,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `9 / 16` tasks done.
+**Overall status:** implementation in progress. `10 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -107,6 +107,18 @@ bound concurrent device work. JSON includes `schema_version`, the requested
 `target`, aggregate counts, and sorted per-device `device`, `site`, `ssh`,
 `status`, and `error` fields; the optional `telemetry` field is omitted for
 devices without a configured provider.
+
+Devices may also reference generic `services`. A service can combine a remote
+SSH `status.command` with controller-side HTTP `health` and `info` probes.
+Configure `states.stopped/loading/ready/error` as exact text or JSON scalar
+values; Opilio does not embed Docker, systemd, vLLM, or SGLang semantics.
+Successful 2xx health responses are ready unless a configured state value
+matches. `info.extract` maps stable field names to RFC 6901 JSON pointers, for
+example `model: /data/0/id`. Probe timeouts default to 5 seconds; live clients
+should poll services every 7 seconds by default, slower than system telemetry.
+HTTP header values must be environment secret references and resolved values
+and reference names are omitted from status output and errors. Service results
+are added under each configured device's optional `services` JSON field.
 
 Named actions resolve implementations per device in the order device override,
 one unambiguous group override, then default. Shell actions use each device's

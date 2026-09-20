@@ -15,6 +15,10 @@ use serde::Serialize;
 use crate::{
     config::Config,
     domain::Device,
+    service::{
+        CommandResponse, EnvironmentSecretResolver, HttpServiceClient, RemoteServiceExecutor,
+        ReqwestHttpClient, ServiceCollector, ServiceObservation, SshServiceExecutor,
+    },
     ssh::CancellationToken,
     target::TargetError,
     telemetry::{SshTelemetryExecutor, TelemetryCollector, TelemetrySnapshot},
@@ -41,6 +45,15 @@ pub trait StatusSource: Sync {
     fn status(&self, device_name: &str, device: &Device) -> Result<StatusState, String>;
 
     fn telemetry(&self, _device_name: &str, _device: &Device) -> Option<TelemetrySnapshot> {
+        None
+    }
+
+    fn services(
+        &self,
+        _device_name: &str,
+        _device: &Device,
+        _config: &Config,
+    ) -> Option<Vec<ServiceObservation>> {
         None
     }
 }
@@ -81,6 +94,63 @@ impl StatusSource for RuntimeStatusSource {
             }),
         }
     }
+
+    fn services(
+        &self,
+        _device_name: &str,
+        device: &Device,
+        config: &Config,
+    ) -> Option<Vec<ServiceObservation>> {
+        if device.services.is_empty() {
+            return None;
+        }
+        let remote: Box<dyn RemoteServiceExecutor> = match SshServiceExecutor::system() {
+            Ok(remote) => Box::new(remote),
+            Err(error) => Box::new(UnavailableRemote(error)),
+        };
+        let http: Box<dyn HttpServiceClient> = match ReqwestHttpClient::new() {
+            Ok(http) => Box::new(http),
+            Err(error) => Box::new(UnavailableHttp(error)),
+        };
+        let secrets = EnvironmentSecretResolver;
+        let collector = ServiceCollector::new(remote.as_ref(), http.as_ref(), &secrets);
+        let cancellation = CancellationToken::new();
+        Some(
+            device
+                .services
+                .iter()
+                .map(|name| {
+                    collector.collect(name, &config.services()[name], device, &cancellation)
+                })
+                .collect(),
+        )
+    }
+}
+
+struct UnavailableRemote(String);
+
+impl RemoteServiceExecutor for UnavailableRemote {
+    fn run(
+        &self,
+        _target: &str,
+        _shell: &str,
+        _command: &str,
+        _timeout: std::time::Duration,
+        _cancellation: &CancellationToken,
+    ) -> Result<CommandResponse, String> {
+        Err(self.0.clone())
+    }
+}
+
+struct UnavailableHttp(String);
+
+impl HttpServiceClient for UnavailableHttp {
+    fn get(
+        &self,
+        _request: &crate::service::HttpRequest,
+    ) -> Result<crate::service::HttpResponse, String> {
+        Err(self.0.clone())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -99,6 +169,8 @@ pub struct DeviceStatusResult {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetrySnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<ServiceObservation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -134,6 +206,9 @@ pub fn write_human(output: &mut dyn Write, report: &StatusReport) -> io::Result<
         writeln!(output, "SSH: {}", result.ssh)?;
         writeln!(output, "Status: {}", status_name(result.status))?;
         writeln!(output, "Detail: {}", value_or_dash(result.error.as_deref()))?;
+        if let Some(services) = &result.services {
+            writeln!(output, "Services: {}", service_summary(services))?;
+        }
         return Ok(());
     }
 
@@ -141,12 +216,22 @@ pub fn write_human(output: &mut dyn Write, report: &StatusReport) -> io::Result<
         .devices
         .iter()
         .map(|result| {
+            let detail = result
+                .error
+                .clone()
+                .or_else(|| {
+                    result
+                        .services
+                        .as_ref()
+                        .map(|services| service_summary(services))
+                })
+                .unwrap_or_else(|| "-".to_owned());
             [
-                result.device.as_str(),
-                value_or_dash(result.site.as_deref()),
-                result.ssh.as_str(),
-                status_name(result.status),
-                value_or_dash(result.error.as_deref()),
+                result.device.clone(),
+                value_or_dash(result.site.as_deref()).to_owned(),
+                result.ssh.clone(),
+                status_name(result.status).to_owned(),
+                detail,
             ]
         })
         .collect::<Vec<_>>();
@@ -160,7 +245,11 @@ pub fn write_human(output: &mut dyn Write, report: &StatusReport) -> io::Result<
     });
     write_table_row(output, headers, widths)?;
     for row in rows {
-        write_table_row(output, row, widths)?;
+        write_table_row(
+            output,
+            std::array::from_fn(|column| row[column].as_str()),
+            widths,
+        )?;
     }
     writeln!(output)?;
     writeln!(
@@ -206,6 +295,47 @@ fn value_or_dash(value: Option<&str>) -> &str {
     value.unwrap_or("-")
 }
 
+fn service_summary(services: &[ServiceObservation]) -> String {
+    services
+        .iter()
+        .map(|service| {
+            let fields = service
+                .fields
+                .iter()
+                .map(|(name, value)| {
+                    format!(
+                        "{name}={}",
+                        value
+                            .as_str()
+                            .map_or_else(|| value.to_string(), str::to_owned)
+                    )
+                })
+                .collect::<Vec<_>>();
+            if fields.is_empty() {
+                format!("{}={}", service.name, service_state_name(service.state))
+            } else {
+                format!(
+                    "{}={} ({})",
+                    service.name,
+                    service_state_name(service.state),
+                    fields.join(", ")
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+const fn service_state_name(state: crate::service::ServiceState) -> &'static str {
+    match state {
+        crate::service::ServiceState::Stopped => "stopped",
+        crate::service::ServiceState::Loading => "loading",
+        crate::service::ServiceState::Ready => "ready",
+        crate::service::ServiceState::Error => "error",
+        crate::service::ServiceState::Unknown => "unknown",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ExitStatus {
@@ -242,6 +372,7 @@ pub fn collect_status(
                 status,
                 error: None,
                 telemetry: source.telemetry(name, device),
+                services: source.services(name, device, config),
             },
             Err(error) => DeviceStatusResult {
                 device: (*name).to_owned(),
@@ -250,6 +381,7 @@ pub fn collect_status(
                 status: StatusState::Failed,
                 error: Some(error),
                 telemetry: None,
+                services: None,
             },
         }
     });

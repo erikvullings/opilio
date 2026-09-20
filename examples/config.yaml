@@ -62,7 +62,17 @@ services:
   llm:
     status:
       command: docker inspect -f '{{.State.Status}}' vllm
+      timeout: 5s
+      states:
+        stopped: [created, exited]
+        loading: [restarting]
+        ready: [running]
+        error: [dead]
     health:
       url: http://localhost:8000/health
+      timeout: 5s
     info:
       url: http://localhost:8000/v1/models
+      timeout: 5s
+      extract:
+        model: /data/0/id

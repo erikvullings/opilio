@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     num::NonZeroUsize,
     sync::{
         Barrier,
@@ -9,9 +10,10 @@ use std::{
 use opilio::{
     config::Config,
     domain::Device,
+    service::{ProbeObservation, ServiceObservation, ServiceState},
     status::{
         ConcurrentExecutor, ConfiguredStatusSource, ExitStatus, StatusRequest, StatusSource,
-        StatusState, collect_status,
+        StatusState, collect_status, write_human,
     },
     telemetry::{
         Metric, ProviderSnapshot, TelemetrySnapshot,
@@ -196,4 +198,58 @@ fn configured_telemetry_is_exposed_without_changing_schema_for_other_devices() {
         serde_json::json!({"state": "available", "value": 12.5})
     );
     assert!(json["devices"][1].get("telemetry").is_none());
+}
+
+struct ServiceFixture;
+
+impl StatusSource for ServiceFixture {
+    fn status(&self, _device_name: &str, _device: &Device) -> Result<StatusState, String> {
+        Ok(StatusState::Configured)
+    }
+
+    fn services(
+        &self,
+        _device_name: &str,
+        device: &Device,
+        _config: &Config,
+    ) -> Option<Vec<ServiceObservation>> {
+        (!device.services.is_empty()).then(|| {
+            vec![ServiceObservation {
+                name: "llm".to_owned(),
+                state: ServiceState::Ready,
+                status: None,
+                health: Some(ProbeObservation {
+                    state: ServiceState::Ready,
+                    http_status: Some(200),
+                    error: None,
+                }),
+                info: None,
+                fields: BTreeMap::from([("model".to_owned(), serde_json::json!("Qwen/Qwen3-32B"))]),
+            }]
+        })
+    }
+}
+
+#[test]
+fn configured_services_are_an_additive_status_json_surface() {
+    let config = Config::from_yaml(
+        &(CONFIG.replace("    site: home", "    site: home\n    services: [llm]")
+            + "\nservices:\n  llm:\n    health:\n      url: http://localhost/health\n"),
+    )
+    .unwrap();
+    let report = collect_status(&config, StatusRequest::default(), &ServiceFixture).unwrap();
+    let json = serde_json::to_value(&report).unwrap();
+
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["devices"][0]["services"][0]["state"], "ready");
+    assert_eq!(
+        json["devices"][0]["services"][0]["fields"]["model"],
+        "Qwen/Qwen3-32B"
+    );
+    assert!(json["devices"][1].get("services").is_none());
+
+    let mut human = Vec::new();
+    write_human(&mut human, &report).unwrap();
+    let human = String::from_utf8(human).unwrap();
+    assert!(human.contains("llm=ready (model=Qwen/Qwen3-32B)"));
 }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     Action, ActionImplementation, Alias, Device, Exec, Group, HttpProbe, Operation, PowerProvider,
-    Service, Site,
+    Service, ServiceStateMapping, Site,
 };
 
 pub use crate::domain::{SecretError, SecretRef, SecretValue};
@@ -294,6 +294,10 @@ impl Config {
                     "service `{name}` has an empty status command"
                 )));
             }
+            if let Some(status) = &service.status {
+                validate_state_mapping(name, "status", &status.states)?;
+                validate_timeout(name, "status", status.timeout.as_ref())?;
+            }
             for (probe_name, probe) in [
                 ("health", service.health.as_ref()),
                 ("info", service.info.as_ref()),
@@ -463,6 +467,67 @@ fn validate_http_probe(
         return Err(validation(format!(
             "service `{service_name}` {probe_name} URL must be an absolute HTTP(S) URL"
         )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(validation(format!(
+            "service `{service_name}` {probe_name} URL must not contain credentials; use header secret references"
+        )));
+    }
+    validate_timeout(service_name, probe_name, probe.timeout.as_ref())?;
+    validate_state_mapping(service_name, probe_name, &probe.states)?;
+    for (name, pointer) in &probe.extract {
+        if name.trim().is_empty() {
+            return Err(validation(format!(
+                "service `{service_name}` {probe_name} has an empty extraction name"
+            )));
+        }
+        if !pointer.is_empty() && !pointer.starts_with('/') {
+            return Err(validation(format!(
+                "service `{service_name}` {probe_name} extraction `{name}` must use an RFC 6901 JSON pointer"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_timeout(
+    service_name: &str,
+    probe_name: &str,
+    timeout: Option<&crate::domain::HumanDuration>,
+) -> Result<(), ConfigError> {
+    if timeout.is_some_and(|timeout| timeout.0.is_zero()) {
+        return Err(validation(format!(
+            "service `{service_name}` {probe_name} timeout must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_state_mapping(
+    service_name: &str,
+    probe_name: &str,
+    states: &ServiceStateMapping,
+) -> Result<(), ConfigError> {
+    let mut configured = BTreeMap::<String, &str>::new();
+    for (state, values) in [
+        ("stopped", &states.stopped),
+        ("loading", &states.loading),
+        ("ready", &states.ready),
+        ("error", &states.error),
+    ] {
+        for value in values {
+            if value.trim().is_empty() {
+                return Err(validation(format!(
+                    "service `{service_name}` {probe_name} state `{state}` contains an empty value"
+                )));
+            }
+            let normalized = value.trim().to_ascii_lowercase();
+            if let Some(previous) = configured.insert(normalized, state) {
+                return Err(validation(format!(
+                    "service `{service_name}` {probe_name} maps `{value}` to both `{previous}` and `{state}`"
+                )));
+            }
+        }
     }
     Ok(())
 }

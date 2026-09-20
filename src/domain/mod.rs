@@ -1,6 +1,6 @@
 //! Core configuration domain types.
 
-use std::{fmt, net::SocketAddrV4, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, fmt, net::SocketAddrV4, str::FromStr, time::Duration};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -291,6 +291,8 @@ pub struct Service {
 pub struct CommandProbe {
     pub command: String,
     pub timeout: Option<HumanDuration>,
+    #[serde(default)]
+    pub states: ServiceStateMapping,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -298,8 +300,26 @@ pub struct CommandProbe {
 pub struct HttpProbe {
     pub url: String,
     #[serde(default)]
-    pub headers: std::collections::BTreeMap<String, SecretRef>,
+    pub headers: BTreeMap<String, SecretRef>,
     pub timeout: Option<HumanDuration>,
+    #[serde(default)]
+    pub states: ServiceStateMapping,
+    /// Named output fields mapped to RFC 6901 JSON pointers.
+    #[serde(default)]
+    pub extract: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceStateMapping {
+    #[serde(default)]
+    pub stopped: Vec<String>,
+    #[serde(default)]
+    pub loading: Vec<String>,
+    #[serde(default)]
+    pub ready: Vec<String>,
+    #[serde(default)]
+    pub error: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

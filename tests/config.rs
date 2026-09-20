@@ -336,3 +336,45 @@ fn invalid_alias_service_and_override_references_fail() {
             .contains("override target `missing`")
     );
 }
+
+#[test]
+fn service_state_and_extraction_configuration_is_strict() {
+    let configured = VALID_CONFIG.replace(
+        "command: docker inspect llm",
+        "command: docker inspect llm\n      states:\n        stopped: [exited]\n        loading: [starting]\n        ready: [running]\n        error: [failed]",
+    );
+    let configured = configured.replace(
+        "url: http://localhost:8000/v1/models",
+        "url: http://localhost:8000/v1/models\n      timeout: 5s\n      extract:\n        model: /data/0/id",
+    );
+    let config = Config::from_yaml(&configured).unwrap();
+    assert_eq!(
+        config.services()["llm"].info.as_ref().unwrap().extract["model"],
+        "/data/0/id"
+    );
+
+    let ambiguous = configured.replace("error: [failed]", "error: [running]");
+    assert!(
+        Config::from_yaml(&ambiguous)
+            .unwrap_err()
+            .to_string()
+            .contains("both `ready` and `error`")
+    );
+    let invalid_pointer = configured.replace("/data/0/id", "data.0.id");
+    assert!(
+        Config::from_yaml(&invalid_pointer)
+            .unwrap_err()
+            .to_string()
+            .contains("RFC 6901 JSON pointer")
+    );
+    let credentials_in_url = configured.replace(
+        "http://localhost:8000/health",
+        "http://user:password@localhost:8000/health",
+    );
+    assert!(
+        Config::from_yaml(&credentials_in_url)
+            .unwrap_err()
+            .to_string()
+            .contains("must not contain credentials")
+    );
+}
