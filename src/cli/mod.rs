@@ -1,6 +1,6 @@
 //! Command-line parsing.
 
-use std::path::PathBuf;
+use std::{num::NonZeroUsize, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -18,6 +18,20 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Show configured status for a device, group, site, or all devices.
+    Status {
+        /// Device, group, site, or `all`; defaults to all devices.
+        target: Option<String>,
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress status output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+        /// Maximum number of devices processed concurrently.
+        #[arg(long, default_value = "4", value_name = "N")]
+        parallel: NonZeroUsize,
+    },
     /// Inspect and validate configuration.
     Config {
         #[command(subcommand)]

@@ -16,7 +16,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 |---|---|---|---|
 | [0001 Bootstrap Rust application](TASKS/0001-bootstrap-rust-application.md) | done | — | Buildable cross-platform CLI/library skeleton |
 | [0002 Load and validate configuration](TASKS/0002-load-and-validate-configuration.md) | done | 0001 | Strict portable YAML + target model |
-| [0003 Status and structured output](TASKS/0003-status-and-structured-output.md) | open | 0002 | `status`, target resolution, stable JSON/exit codes |
+| [0003 Status and structured output](TASKS/0003-status-and-structured-output.md) | done | 0002 | `status`, target resolution, stable JSON/exit codes |
 | [0004 OpenSSH execution layer](TASKS/0004-openssh-execution-layer.md) | open | 0002 | System SSH, commands/exec, multiplexing seam |
 | [0005 Named actions and aliases](TASKS/0005-named-actions-and-aliases.md) | open | 0003, 0004 | Safe named remote actions + one-op aliases |
 | [0006 Shelly power provider](TASKS/0006-shelly-power-provider.md) | open | 0003 | Local Shelly switching + electrical telemetry |
@@ -31,7 +31,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `2 / 16` tasks done.
+**Overall status:** implementation in progress. `3 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -68,6 +68,7 @@ environment references such as `${env:OPILIO_SHELLY_HOME_PASSWORD}`.
 ```sh
 opilio config path
 opilio config check
+opilio status [device|group|site|all]
 opilio device ls
 opilio group ls
 opilio site ls
@@ -76,3 +77,14 @@ opilio action ls
 
 `config check` only parses and statically validates configuration. It performs
 no network, process, or hardware probes.
+
+`status` defaults to all devices and currently reports the reachability-neutral
+`configured` state. Use `--json` for the stable versioned result document,
+`--quiet` to rely on the exit code alone, and `--parallel N` to bound concurrent
+device work. JSON includes `schema_version`, the requested `target`, aggregate
+counts, and sorted per-device `device`, `site`, `ssh`, `status`, and `error`
+fields.
+
+Command exit codes are `0` for success, `1` when all device work fails, `2` for
+configuration or usage errors, and `3` for partial success. Group, site, and
+all-device status retain every per-device result rather than failing fast.

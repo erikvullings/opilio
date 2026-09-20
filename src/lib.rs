@@ -9,6 +9,7 @@ pub mod power;
 pub mod scheduler;
 pub mod service;
 pub mod ssh;
+pub mod status;
 pub mod target;
 pub mod telemetry;
 pub mod transfer;
