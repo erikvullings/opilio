@@ -9,8 +9,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Action, ActionImplementation, Alias, Device, Exec, Group, HttpProbe, PowerProvider, Service,
-    Site,
+    Action, ActionImplementation, Alias, Device, Exec, Group, HttpProbe, Operation, PowerProvider,
+    Service, Site,
 };
 
 pub use crate::domain::{SecretError, SecretRef, SecretValue};
@@ -369,6 +369,23 @@ impl Config {
                 return Err(validation(format!(
                     "alias `{name}` references unknown target `{}`",
                     alias.target
+                )));
+            }
+            if alias.wait && alias.operation != Operation::On {
+                return Err(validation(format!(
+                    "alias `{name}` operation `{:?}` does not support `wait`",
+                    alias.operation
+                )));
+            }
+            if alias.force
+                && !matches!(
+                    alias.operation,
+                    Operation::Off | Operation::PowerOff | Operation::PowerCycle
+                )
+            {
+                return Err(validation(format!(
+                    "alias `{name}` operation `{:?}` does not support `force`",
+                    alias.operation
                 )));
             }
         }

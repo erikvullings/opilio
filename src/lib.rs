@@ -1,5 +1,7 @@
 //! Shared application surface for every Opilio entry point.
 
+pub mod action;
+pub mod alias;
 pub mod app;
 pub mod cli;
 pub mod config;

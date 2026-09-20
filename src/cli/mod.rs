@@ -60,7 +60,12 @@ pub enum Command {
     /// Inspect configured actions.
     Action {
         #[command(subcommand)]
-        command: ListCommand,
+        command: ActionCommand,
+    },
+    /// Run a configured one-operation alias.
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommand,
     },
 }
 
@@ -77,6 +82,51 @@ pub enum ListCommand {
     /// List configured names.
     #[command(name = "ls")]
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ActionCommand {
+    /// List configured action names.
+    #[command(name = "ls")]
+    List {
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
+    /// Run a named action on a device, group, site, or all devices.
+    Run {
+        /// Configured action name.
+        name: String,
+        /// Device, group, site, or `all`.
+        target: String,
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+        /// Maximum number of devices processed concurrently.
+        #[arg(long, default_value = "1", value_name = "N")]
+        parallel: NonZeroUsize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AliasCommand {
+    /// Expand and execute an alias exactly once.
+    Run {
+        /// Configured alias name.
+        name: String,
+        /// Emit the operation's stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
 }
 
 #[cfg(test)]

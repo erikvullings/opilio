@@ -18,7 +18,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0002 Load and validate configuration](TASKS/0002-load-and-validate-configuration.md) | done | 0001 | Strict portable YAML + target model |
 | [0003 Status and structured output](TASKS/0003-status-and-structured-output.md) | done | 0002 | `status`, target resolution, stable JSON/exit codes |
 | [0004 OpenSSH execution layer](TASKS/0004-openssh-execution-layer.md) | done | 0002 | System SSH, commands/exec, multiplexing seam |
-| [0005 Named actions and aliases](TASKS/0005-named-actions-and-aliases.md) | open | 0003, 0004 | Safe named remote actions + one-op aliases |
+| [0005 Named actions and aliases](TASKS/0005-named-actions-and-aliases.md) | done | 0003, 0004 | Safe named remote actions + one-op aliases |
 | [0006 Shelly power provider](TASKS/0006-shelly-power-provider.md) | open | 0003 | Local Shelly switching + electrical telemetry |
 | [0007 Wake-on-LAN provider](TASKS/0007-wake-on-lan-provider.md) | open | 0003 | WoL power-on support |
 | [0008 Safe lifecycle operations](TASKS/0008-safe-lifecycle-operations.md) | open | 0004, 0006, 0007 | on/off/reboot/power-cycle safety semantics |
@@ -31,7 +31,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `4 / 16` tasks done.
+**Overall status:** implementation in progress. `5 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -73,6 +73,8 @@ opilio device ls
 opilio group ls
 opilio site ls
 opilio action ls
+opilio action run <name> <device|group|site|all> [--parallel N]
+opilio alias run <name>
 opilio ssh <device>
 ```
 
@@ -91,6 +93,19 @@ explicitly with `-lc`.
 device work. JSON includes `schema_version`, the requested `target`, aggregate
 counts, and sorted per-device `device`, `site`, `ssh`, `status`, and `error`
 fields.
+
+Named actions resolve implementations per device in the order device override,
+one unambiguous group override, then default. Shell actions use each device's
+explicit shell; structured `exec` actions quote arguments without shell
+interpolation. Actions are sequential by default; `--parallel N` opts into
+bounded concurrency. Human, `--json`, and `--quiet` output retain every device
+result and use the standard success/failure/partial-success exits.
+
+`alias run` expands a configured alias exactly once to its fixed operation,
+target, and options. Aliases cannot reference aliases or contain workflow
+steps. Read-only status aliases default to four workers; disruptive aliases
+default to one. Aliases for lifecycle operations become executable when those
+operations are added by their dedicated tasks.
 
 Command exit codes are `0` for success, `1` when all device work fails, `2` for
 configuration or usage errors, and `3` for partial success. Group, site, and

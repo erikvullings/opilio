@@ -9,7 +9,7 @@ Task details and resumable notes live in the linked files. The root
 - [x] [0002 Load and validate configuration](0002-load-and-validate-configuration.md)
 - [ ] [0003 Status and structured output](0003-status-and-structured-output.md)
 - [ ] [0004 OpenSSH execution layer](0004-openssh-execution-layer.md)
-- [ ] [0005 Named actions and aliases](0005-named-actions-and-aliases.md)
+- [x] [0005 Named actions and aliases](0005-named-actions-and-aliases.md)
 - [ ] [0006 Shelly power provider](0006-shelly-power-provider.md)
 - [ ] [0007 Wake-on-LAN provider](0007-wake-on-lan-provider.md)
 - [ ] [0008 Safe lifecycle operations](0008-safe-lifecycle-operations.md)
