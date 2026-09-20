@@ -24,6 +24,31 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Export a safe, non-secret portable setup bundle.
+    Export {
+        /// Destination bundle path.
+        bundle: PathBuf,
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
+    /// Import a portable setup bundle and diagnose the imported flock.
+    Import {
+        /// Source bundle path.
+        bundle: PathBuf,
+        /// Never prompt; report unresolved controller-local requirements.
+        #[arg(long)]
+        non_interactive: bool,
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
     /// Open an interactive system OpenSSH session to exactly one device.
     Ssh {
         /// Configured Opilio device name.

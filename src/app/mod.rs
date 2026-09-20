@@ -41,6 +41,11 @@ use crate::{
         StatusSource, collect_status, write_human, write_json,
     },
     target::TargetError,
+    transfer::{
+        ExportRequest, ImportInteraction, ImportMappings, ImportRequest, LocalRequirements,
+        TransferError, default_ssh_paths, export_bundle, import_bundle, write_export_human,
+        write_export_json, write_import_human, write_import_json,
+    },
     tui,
 };
 
@@ -267,6 +272,55 @@ fn execute_with_adapters(
     let path = config_path(cli.config)?;
 
     match command {
+        Command::Export {
+            bundle,
+            json,
+            quiet,
+        } => {
+            let (user_ssh_config, _) = default_ssh_paths()?;
+            let report = export_bundle(&ExportRequest {
+                config_path: path,
+                ssh_config_path: user_ssh_config,
+                bundle_path: bundle,
+            })?;
+            if !quiet {
+                if json {
+                    write_export_json(output, &report)?;
+                } else {
+                    write_export_human(output, &report)?;
+                }
+            }
+            Ok(ExitStatus::Success)
+        }
+        Command::Import {
+            bundle,
+            non_interactive,
+            json,
+            quiet,
+        } => {
+            let (user_ssh_config, owned_ssh_config) = default_ssh_paths()?;
+            let system_probe = SystemDoctorProbe;
+            let probe = doctor_probe.unwrap_or(&system_probe);
+            let report = import_bundle(
+                &ImportRequest {
+                    bundle_path: bundle,
+                    config_path: path,
+                    user_ssh_config_path: user_ssh_config,
+                    owned_ssh_config_path: owned_ssh_config,
+                    non_interactive,
+                },
+                &StdinImportInteraction,
+                probe,
+            )?;
+            if !quiet {
+                if json {
+                    write_import_json(output, &report)?;
+                } else {
+                    write_import_human(output, &report)?;
+                }
+            }
+            Ok(report.exit_status())
+        }
         Command::Ssh { device } => {
             let config = Config::load(&path)?;
             let configured_device = config.devices().get(&device).ok_or_else(|| {
@@ -797,6 +851,45 @@ pub trait Confirmation {
 #[derive(Debug, Clone, Copy)]
 struct StdinConfirmation;
 
+#[derive(Debug, Clone, Copy)]
+struct StdinImportInteraction;
+
+impl ImportInteraction for StdinImportInteraction {
+    fn mappings(&self, requirements: &LocalRequirements) -> Result<ImportMappings, String> {
+        eprintln!("Configure controller-local SSH mappings (blank preserves/defers).");
+        if !requirements.ssh_usernames.is_empty() {
+            eprintln!(
+                "Bundled SSH usernames: {}",
+                requirements.ssh_usernames.join(", ")
+            );
+        }
+        eprint!("Replacement SSH username for applicable hosts: ");
+        io::stderr().flush().map_err(|error| error.to_string())?;
+        let mut username = String::new();
+        io::stdin()
+            .lock()
+            .read_line(&mut username)
+            .map_err(|error| error.to_string())?;
+        if !requirements.identity_files.is_empty() {
+            eprintln!(
+                "Required SSH identities: {}",
+                requirements.identity_files.join(", ")
+            );
+        }
+        eprint!("Replacement SSH private-key path for applicable hosts: ");
+        io::stderr().flush().map_err(|error| error.to_string())?;
+        let mut identity = String::new();
+        io::stdin()
+            .lock()
+            .read_line(&mut identity)
+            .map_err(|error| error.to_string())?;
+        Ok(ImportMappings {
+            username: (!username.trim().is_empty()).then(|| username.trim().to_owned()),
+            identity_file: (!identity.trim().is_empty()).then(|| identity.trim().into()),
+        })
+    }
+}
+
 impl Confirmation for StdinConfirmation {
     fn confirm(&self, operation: LifecycleOperation, devices: &[String]) -> Result<bool, String> {
         eprintln!(
@@ -974,6 +1067,8 @@ pub enum AppError {
     History(#[from] HistoryError),
     #[error(transparent)]
     Schedule(#[from] ScheduleError),
+    #[error(transparent)]
+    Transfer(#[from] TransferError),
     #[error("could not read confirmation: {0}")]
     Confirmation(String),
     #[error("operation cancelled")]
@@ -996,6 +1091,7 @@ impl AppError {
             | Self::Alias(_)
             | Self::Lifecycle(_)
             | Self::Target(_)
+            | Self::Transfer(_)
             | Self::History(HistoryError::NotFound(_) | HistoryError::InvalidConfig(_))
             | Self::Schedule(
                 ScheduleError::InvalidId(_)

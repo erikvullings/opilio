@@ -28,10 +28,10 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0012 Build the TUI dashboard](TASKS/0012-build-tui-dashboard.md) | done | 0008, 0009, 0010, 0011 | Keyboard-first live fleet dashboard |
 | [0013 Diagnostics and doctor](TASKS/0013-diagnostics-and-doctor.md) | done | 0006, 0007, 0009, 0010 | Static config check + runtime diagnostics |
 | [0014 Native scheduling adapters](TASKS/0014-native-scheduling-adapters.md) | done | 0005, 0011 | Linux/macOS/Windows schedule ls/add/rm |
-| [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
+| [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | done | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `14 / 16` tasks done.
+**Overall status:** implementation in progress. `15 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -85,6 +85,8 @@ opilio alias run <name>
 opilio schedule ls [--json]
 opilio schedule add <id> --at HH:MM [--json] -- <operation...>
 opilio schedule rm <id> [--json]
+opilio export <bundle> [--json] [--quiet]
+opilio import <bundle> [--non-interactive] [--json] [--quiet]
 opilio ssh <device>
 opilio history [device|group|site|all] [--json]
 opilio history show <id> [--json]
@@ -97,6 +99,19 @@ actions, `s` for a system-OpenSSH handoff, and `?` for help. Collection
 operations require confirmation. Polls and long operations run off the render
 loop; unreachable sites back off automatically and manual refresh retries
 immediately. Telemetry graphs are intentionally memory-only.
+
+`export` writes a versioned tar bundle containing normalized portable flock
+YAML, only exact OpenSSH `Host` entries used by configured devices and their
+`ProxyJump` chain, and names/labels for required environment variables and SSH
+keys. It never reads or embeds private keys, removes controller-local
+`IdentityFile` paths, and refuses content containing a resolved secret.
+
+`import` validates the complete bundle before writing, installs SSH entries in
+the separate `~/.ssh/opilio/config` include, then statically reloads the
+installed flock and runs targeted `doctor` checks. Interactive import asks once
+for replacement SSH username/key mappings. `--non-interactive` installs only
+safe pieces and returns partial-success (`3`) with unresolved environment/key
+requirements; malformed, unsupported, or path-unsafe bundles return `2`.
 
 `config check` only parses and statically validates configuration. It performs
 no network, process, or hardware probes.

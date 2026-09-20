@@ -100,6 +100,30 @@ impl Config {
         values
     }
 
+    /// Returns the portable names of every environment variable required by the flock.
+    pub fn required_secret_names(&self) -> Vec<String> {
+        let mut names = BTreeSet::new();
+        for device in self.devices.values() {
+            if let Some(crate::domain::PowerProvider::Shelly {
+                auth: Some(auth), ..
+            }) = &device.power
+            {
+                names.insert(auth.password.environment_variable().to_owned());
+            }
+        }
+        for service in self.services.values() {
+            for probe in [service.health.as_ref(), service.info.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                for reference in probe.headers.values() {
+                    names.insert(reference.environment_variable().to_owned());
+                }
+            }
+        }
+        names.into_iter().collect()
+    }
+
     pub fn resolve_action(
         &self,
         action_name: &str,
