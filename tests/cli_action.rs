@@ -328,3 +328,60 @@ fn unknown_actions_targets_and_zero_parallelism_are_usage_errors() {
     .unwrap_err();
     assert_eq!(usage.exit_code(), 2);
 }
+
+#[test]
+fn action_output_never_exposes_resolved_controller_secrets() {
+    const VARIABLE: &str = "OPILIO_TEST_ACTION_SECRET";
+    const SECRET: &str = "task-0016-resolved-secret";
+    let path = config_path();
+    fs::write(
+        &path,
+        CONFIG.replace(
+            "groups:\n",
+            &format!(
+                "services:\n  protected:\n    health:\n      url: http://localhost/health\n      headers:\n        Authorization: \"${{env:{VARIABLE}}}\"\ngroups:\n"
+            ),
+        ),
+    )
+    .unwrap();
+    unsafe { std::env::set_var(VARIABLE, SECRET) };
+    let executor = SecretEcho(SECRET);
+    let cli = Cli::try_parse_from([
+        "opilio",
+        "--config",
+        path.to_str().unwrap(),
+        "action",
+        "run",
+        "update",
+        "alpha",
+        "--json",
+    ])
+    .unwrap();
+    let mut output = Vec::new();
+
+    let status = app::execute_with_action_executor(cli, &mut output, &executor).unwrap();
+
+    unsafe { std::env::remove_var(VARIABLE) };
+    let output = String::from_utf8(output).unwrap();
+    assert_eq!(status, ExitStatus::Failed);
+    assert!(!output.contains(SECRET));
+    assert!(output.contains("[REDACTED]"));
+}
+
+struct SecretEcho(&'static str);
+
+impl ActionExecutor for SecretEcho {
+    fn execute(
+        &self,
+        _ssh_target: &str,
+        _invocation: &RemoteInvocation,
+        _options: ExecutionOptions,
+    ) -> Result<ProcessOutput, String> {
+        Ok(ProcessOutput {
+            exit_code: Some(1),
+            stdout: format!("stdout {}", self.0).into_bytes(),
+            stderr: format!("stderr {}", self.0).into_bytes(),
+            ..ProcessOutput::default()
+        })
+    }
+}

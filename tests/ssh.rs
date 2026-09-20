@@ -132,8 +132,8 @@ fn execution_forwards_timeout_cancellation_and_capture_bound_to_adapter() {
         .unwrap();
 
     assert!(result.timed_out);
-    assert_eq!(result.stdout, b"over");
-    assert_eq!(result.stderr, b"over");
+    assert_eq!(result.stdout, b"tput");
+    assert_eq!(result.stderr, b"rror");
     assert!(result.stdout_truncated);
     assert!(result.stderr_truncated);
     let request = &process.requests()[0];

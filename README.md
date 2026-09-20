@@ -4,6 +4,11 @@ Opilio is a cross-platform Rust CLI/TUI for managing a small **flock** of remote
 
 The product decisions from the requirements grill are captured in [`docs/OPILIO_V1_SPEC.md`](docs/OPILIO_V1_SPEC.md). Coding agents should treat that document as the v1 product contract and [`AGENTS.md`](AGENTS.md) as the task workflow.
 
+See the [v1 user guide](docs/USER_GUIDE.md) for installation, setup, safety,
+scheduling, migration, and troubleshooting. The
+[acceptance matrix](docs/V1_ACCEPTANCE.md) links every release criterion to
+automated evidence.
+
 ## Task workflow
 
 Tasks are independent Markdown files under [`TASKS/`](TASKS/). Each task contains enough context, requirements, dependencies, implementation guidance, acceptance criteria, and validation steps for a fresh coding-agent session to pick it up. Tasks should be completed in dependency order, but independent tasks may be worked in parallel.
@@ -29,9 +34,9 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0013 Diagnostics and doctor](TASKS/0013-diagnostics-and-doctor.md) | done | 0006, 0007, 0009, 0010 | Static config check + runtime diagnostics |
 | [0014 Native scheduling adapters](TASKS/0014-native-scheduling-adapters.md) | done | 0005, 0011 | Linux/macOS/Windows schedule ls/add/rm |
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | done | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
-| [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
+| [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | done | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `15 / 16` tasks done.
+**Overall status:** v1 complete. `16 / 16` tasks done.
 
 ## Suggested milestones
 

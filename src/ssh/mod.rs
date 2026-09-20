@@ -319,10 +319,12 @@ fn spawn_bounded_reader(
             if read == 0 {
                 return Ok((captured, truncated));
             }
-            let remaining = limit.saturating_sub(captured.len());
-            let retained = remaining.min(read);
-            captured.extend_from_slice(&buffer[..retained]);
-            truncated |= retained < read;
+            captured.extend_from_slice(&buffer[..read]);
+            if captured.len() > limit {
+                let excess = captured.len() - limit;
+                captured.drain(..excess);
+                truncated = true;
+            }
         }
     })
 }
@@ -596,7 +598,7 @@ fn control_path_option(control_path: &Path) -> OsString {
 
 fn bound_output(output: &mut Vec<u8>, truncated: &mut bool, limit: usize) {
     if output.len() > limit {
-        output.truncate(limit);
+        output.drain(..output.len() - limit);
         *truncated = true;
     }
 }

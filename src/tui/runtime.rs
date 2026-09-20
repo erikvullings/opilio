@@ -1,12 +1,17 @@
 use std::{
     collections::HashSet,
-    fs,
     io::{self, IsTerminal, Stdout},
     num::NonZeroUsize,
-    path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
+};
+
+#[cfg(not(windows))]
+use std::{
+    fs,
+    hash::{DefaultHasher, Hash, Hasher},
+    path::PathBuf,
 };
 
 use crossterm::{
@@ -30,13 +35,13 @@ use crate::{
         shelly::{ReqwestHttpClient as ShellyHttpClient, ShellyProvider},
     },
     service::{
-        EnvironmentSecretResolver, ReqwestHttpClient, ServiceCollector, ServiceObservation,
-        ServiceState,
+        EnvironmentSecretResolver, RemoteServiceExecutor, ReqwestHttpClient, ServiceCollector,
+        ServiceObservation, ServiceState,
     },
     ssh::{CancellationToken, OpenSsh},
     telemetry::{
-        Metric, ProviderSnapshot, TelemetryCollector, TelemetrySnapshot, nvidia::NvidiaMetrics,
-        system::SystemMetrics,
+        Metric, ProviderSnapshot, RemoteTelemetryExecutor, TelemetryCollector, TelemetrySnapshot,
+        nvidia::NvidiaMetrics, system::SystemMetrics,
     },
 };
 
@@ -73,6 +78,7 @@ impl TerminalSession {
         let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => terminal,
             Err(error) => {
+                let _ = execute!(io::stdout(), LeaveAlternateScreen);
                 let _ = disable_raw_mode();
                 return Err(error);
             }
@@ -85,10 +91,13 @@ impl TerminalSession {
 
     fn suspend(&mut self) -> io::Result<()> {
         if self.active {
-            disable_raw_mode()?;
-            execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
-            self.terminal.show_cursor()?;
+            let raw = disable_raw_mode();
+            let screen = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+            let cursor = self.terminal.show_cursor();
             self.active = false;
+            raw?;
+            screen?;
+            cursor?;
         }
         Ok(())
     }
@@ -96,9 +105,15 @@ impl TerminalSession {
     fn resume(&mut self) -> io::Result<()> {
         if !self.active {
             enable_raw_mode()?;
-            execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
-            self.terminal.clear()?;
+            if let Err(error) = execute!(self.terminal.backend_mut(), EnterAlternateScreen) {
+                let _ = disable_raw_mode();
+                return Err(error);
+            }
             self.active = true;
+            if let Err(error) = self.terminal.clear() {
+                let _ = self.suspend();
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -276,6 +291,20 @@ fn poll_device(
             return sample;
         }
     };
+    poll_remote(config, name, due, cancellation, power.as_ref(), ssh, sample)
+}
+
+#[cfg(not(windows))]
+fn poll_remote(
+    config: &Config,
+    name: &str,
+    due: &[PollKind],
+    cancellation: &CancellationToken,
+    power: Option<&(OutletState, Option<f64>, Option<String>)>,
+    ssh: OpenSsh,
+    mut sample: DashboardSample,
+) -> DashboardSample {
+    let device = &config.devices()[name];
     let path = control_path(name);
     if let Some(parent) = path.parent()
         && let Err(error) = fs::create_dir_all(parent)
@@ -288,25 +317,91 @@ fn poll_device(
         Ok(master) => master,
         Err(error) => {
             let _ = fs::remove_file(path);
-            sample.state = if power
-                .as_ref()
-                .is_some_and(|(outlet, _, _)| *outlet == OutletState::Off)
-            {
-                DeviceState::Off
-            } else {
-                DeviceState::Unreachable
-            };
-            sample.error = Some(error.to_string());
-            return sample;
+            return unreachable_sample(sample, power, error.to_string());
         }
     };
+    collect_remote(
+        config,
+        name,
+        due,
+        cancellation,
+        &master,
+        &master,
+        &mut sample,
+    );
+    let _ = master.close();
+    let _ = fs::remove_file(path);
+    sample
+}
+
+#[cfg(windows)]
+fn poll_remote(
+    config: &Config,
+    name: &str,
+    due: &[PollKind],
+    cancellation: &CancellationToken,
+    power: Option<&(OutletState, Option<f64>, Option<String>)>,
+    ssh: OpenSsh,
+    mut sample: DashboardSample,
+) -> DashboardSample {
+    use crate::{
+        service::SshServiceExecutor,
+        ssh::{ExecutionOptions, RemoteInvocation},
+        telemetry::SshTelemetryExecutor,
+    };
+
+    let device = &config.devices()[name];
+    let probe = ssh.execute(
+        &device.ssh,
+        &RemoteInvocation::command(":", &device.shell),
+        ExecutionOptions {
+            timeout: Some(Duration::from_secs(5)),
+            cancellation: cancellation.clone(),
+            ..ExecutionOptions::default()
+        },
+    );
+    match probe {
+        Ok(output) if output.success() => {}
+        Ok(output) => {
+            return unreachable_sample(
+                sample,
+                power,
+                format!("OpenSSH probe exited {:?}", output.exit_code),
+            );
+        }
+        Err(error) => return unreachable_sample(sample, power, error.to_string()),
+    }
+    let telemetry = SshTelemetryExecutor::new(ssh.clone());
+    let services = SshServiceExecutor::new(ssh);
+    collect_remote(
+        config,
+        name,
+        due,
+        cancellation,
+        &telemetry,
+        &services,
+        &mut sample,
+    );
+    sample
+}
+
+fn collect_remote(
+    config: &Config,
+    name: &str,
+    due: &[PollKind],
+    cancellation: &CancellationToken,
+    telemetry_remote: &dyn RemoteTelemetryExecutor,
+    service_remote: &dyn RemoteServiceExecutor,
+    sample: &mut DashboardSample,
+) {
+    let device = &config.devices()[name];
     sample.state = DeviceState::Running;
     if due.contains(&PollKind::Telemetry)
         && let Some(provider) = device.telemetry.clone()
     {
         apply_telemetry(
-            &mut sample,
-            TelemetryCollector::new(&master).collect(
+            sample,
+            TelemetryCollector::new(telemetry_remote).collect(
                 &device.ssh,
                 &device.shell,
                 provider,
@@ -319,11 +414,11 @@ fn poll_device(
             Ok(http) => http,
             Err(error) => {
                 sample.error = Some(error);
-                return sample;
+                return;
             }
         };
         let secrets = EnvironmentSecretResolver;
-        let collector = ServiceCollector::new(&master, &http, &secrets);
+        let collector = ServiceCollector::new(service_remote, &http, &secrets);
         let observations = device
             .services
             .iter()
@@ -331,10 +426,21 @@ fn poll_device(
                 collector.collect(service, &config.services()[service], device, cancellation)
             })
             .collect::<Vec<_>>();
-        apply_services(&mut sample, &observations);
+        apply_services(sample, &observations);
     }
-    let _ = master.close();
-    let _ = fs::remove_file(path);
+}
+
+fn unreachable_sample(
+    mut sample: DashboardSample,
+    power: Option<&(OutletState, Option<f64>, Option<String>)>,
+    error: String,
+) -> DashboardSample {
+    sample.state = if power.is_some_and(|(outlet, _, _)| *outlet == OutletState::Off) {
+        DeviceState::Off
+    } else {
+        DeviceState::Unreachable
+    };
+    sample.error = Some(error);
     sample
 }
 
@@ -645,22 +751,18 @@ fn map_lifecycle_state(state: LifecycleState) -> DeviceState {
     }
 }
 
+#[cfg(not(windows))]
 fn control_path(device: &str) -> PathBuf {
     let base = directories::ProjectDirs::from("", "", "opilio")
         .map(|dirs| dirs.cache_dir().to_owned())
         .unwrap_or_else(|| PathBuf::from(".opilio-cache"));
-    let safe = device
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    base.join("ssh")
-        .join(format!("{}-{safe}.sock", std::process::id()))
+    let mut hasher = DefaultHasher::new();
+    device.hash(&mut hasher);
+    base.join("ssh").join(format!(
+        "{}-{:016x}.sock",
+        std::process::id(),
+        hasher.finish()
+    ))
 }
 
 fn map_key(code: KeyCode) -> Key {
@@ -683,5 +785,19 @@ fn map_key(code: KeyCode) -> Key {
         KeyCode::Char('q') => Key::Quit,
         KeyCode::Char(character) => Key::Char(character),
         _ => Key::Char('\0'),
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::control_path;
+
+    #[test]
+    fn control_socket_names_are_short_and_device_specific() {
+        let first = control_path(&"a".repeat(63));
+        let second = control_path(&format!("{}b", "a".repeat(62)));
+
+        assert!(first.file_name().unwrap().len() <= 32);
+        assert_ne!(first, second);
     }
 }

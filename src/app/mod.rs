@@ -554,12 +554,13 @@ fn execute_with_adapters(
                 target,
                 parallelism: parallel,
             };
-            let report = if let Some(executor) = action_executor {
+            let mut report = if let Some(executor) = action_executor {
                 run_action(&config, request, executor)?
             } else {
                 let ssh = OpenSsh::system()?;
                 run_action(&config, request, &ssh)?
             };
+            redact_action_report(&mut report, &Redactor::new(config.resolved_secret_values()));
             if let Some(history) = history {
                 record_action_history(history, &report, elapsed_millis(started))?;
             }
@@ -812,7 +813,11 @@ fn execute_lifecycle_values(
         system_executor = SystemLifecycleExecutor::system();
         &system_executor
     };
-    let report = execute_lifecycle(config, plan, executor)?;
+    let mut report = execute_lifecycle(config, plan, executor)?;
+    let redactor = Redactor::new(config.resolved_secret_values());
+    for result in &mut report.devices {
+        result.error = result.error.take().map(|error| redactor.redact(&error));
+    }
     if let Some(history) = history {
         record_lifecycle_history(
             history,
@@ -923,7 +928,7 @@ fn execute_status(
     history: Option<HistoryContext<'_>>,
 ) -> Result<ExitStatus, AppError> {
     let started = Instant::now();
-    let report = collect_status(
+    let mut report = collect_status(
         config,
         StatusRequest {
             target,
@@ -931,6 +936,7 @@ fn execute_status(
         },
         status_source,
     )?;
+    redact_status_report(&mut report, &Redactor::new(config.resolved_secret_values()));
     if let Some(history) = history {
         record_status_history(history, &report, elapsed_millis(started))?;
     }
@@ -970,7 +976,69 @@ fn record_action_history(
             error: result.error.clone(),
         })?;
     }
+
     Ok(())
+}
+
+fn redact_status_report(report: &mut crate::status::StatusReport, redactor: &Redactor) {
+    for result in &mut report.devices {
+        result.error = result.error.take().map(|error| redactor.redact(&error));
+        if let Some(telemetry) = &mut result.telemetry {
+            redact_provider_error(&mut telemetry.system, redactor);
+            if let Some(nvidia) = &mut telemetry.nvidia {
+                redact_provider_error(nvidia, redactor);
+            }
+        }
+        for service in result.services.iter_mut().flatten() {
+            for probe in [
+                service.status.as_mut(),
+                service.health.as_mut(),
+                service.info.as_mut(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                probe.error = probe.error.take().map(|error| redactor.redact(&error));
+            }
+            for value in service.fields.values_mut() {
+                redact_json_strings(value, redactor);
+            }
+        }
+    }
+}
+
+fn redact_provider_error<T>(
+    provider: &mut crate::telemetry::ProviderSnapshot<T>,
+    redactor: &Redactor,
+) {
+    if let crate::telemetry::ProviderSnapshot::Unavailable { error } = provider {
+        *error = redactor.redact(error);
+    }
+}
+
+fn redact_json_strings(value: &mut serde_json::Value, redactor: &Redactor) {
+    match value {
+        serde_json::Value::String(text) => *text = redactor.redact(text),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_json_strings(value, redactor);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_json_strings(value, redactor);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn redact_action_report(report: &mut crate::action::ActionReport, redactor: &Redactor) {
+    for result in &mut report.devices {
+        result.stdout = redactor.redact(&result.stdout);
+        result.stderr = redactor.redact(&result.stderr);
+        result.error = result.error.take().map(|error| redactor.redact(&error));
+    }
 }
 
 fn record_lifecycle_history(

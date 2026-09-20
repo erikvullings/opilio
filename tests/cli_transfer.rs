@@ -155,6 +155,24 @@ fn transfer_cli_emits_human_and_versioned_json_reports() {
     assert_eq!(report["validation"], "configuration is valid");
     assert_eq!(report["diagnostics"]["target"], "all");
 
+    for command in [
+        vec!["config", "check"],
+        vec!["doctor", "all", "--quiet"],
+        vec!["status", "all", "--quiet"],
+    ] {
+        let mut arguments = vec!["opilio", "--config", destination.to_str().unwrap()];
+        arguments.extend(command);
+        assert_eq!(
+            app::execute_with_doctor_probe(
+                Cli::try_parse_from(arguments).unwrap(),
+                &mut Vec::new(),
+                &HealthyDoctor,
+            )
+            .unwrap(),
+            ExitStatus::Success
+        );
+    }
+
     match previous_home {
         Some(value) => unsafe { std::env::set_var("HOME", value) },
         None => unsafe { std::env::remove_var("HOME") },
