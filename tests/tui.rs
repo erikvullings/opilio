@@ -260,7 +260,6 @@ fn stable_renderer_shows_master_detail_status_and_shortcuts() {
         "litellm",
         "ready",
         "Qwen3-0.6B",
-        "power meter required",
         "[o] On",
         "[?] Help",
     ] {
@@ -269,6 +268,23 @@ fn stable_renderer_shows_master_detail_status_and_shortcuts() {
             "missing {expected:?}\n{rendered}"
         );
     }
+    assert!(!rendered.contains("Power draw"));
+    assert!(rendered.contains("Device      alpha  running"));
+    assert!(rendered.contains("SSH         alpha"));
+    assert!(rendered.contains("RAM used    92.0 / 128.0 GiB (72.4%)"));
+
+    let lines = rendered.lines().collect::<Vec<_>>();
+    let last_model = lines
+        .iter()
+        .position(|line| line.contains("Qwen3-0.6B"))
+        .unwrap();
+    assert!(!lines[last_model + 1].contains("RAM used"));
+
+    let ram_graph_end = lines
+        .iter()
+        .position(|line| line.contains("└") && line.contains("─") && line.contains("┘"))
+        .unwrap();
+    assert!(!lines[ram_graph_end + 1].contains("GPU busy"));
 }
 
 #[test]
@@ -278,6 +294,26 @@ fn renderer_remains_safe_at_a_compact_terminal_size() {
 
     assert!(rendered.contains("Details"));
     assert!(rendered.contains("RAM used"));
+}
+
+#[test]
+fn power_details_and_history_appear_when_meter_data_exists() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Running,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: Some(118.4),
+        services: None,
+        error: None,
+    }));
+
+    let rendered = render_to_string(&dashboard, 120, 30);
+    assert!(rendered.contains("Power draw  118.4 W"));
+    assert!(rendered.contains("Power draw  now 118.4 W"));
 }
 
 #[test]

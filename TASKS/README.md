@@ -31,3 +31,4 @@ Task details and resumable notes live in the linked files. The root
 ## Post-v1 refinements
 
 - [x] [0017 Improve TUI observability](0017-improve-tui-observability.md)
+- [x] [0018 Refine TUI details layout](0018-refine-tui-details-layout.md)

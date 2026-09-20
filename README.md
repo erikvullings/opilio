@@ -36,8 +36,9 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | done | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | done | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 | [0017 Improve TUI observability](TASKS/0017-improve-tui-observability.md) | done | 0010, 0012 | Clear memory, multi-model services, useful telemetry history |
+| [0018 Refine TUI details layout](TASKS/0018-refine-tui-details-layout.md) | done | 0017 | Aligned details, intentional spacing, conditional power |
 
-**Overall status:** v1 plus the first observability refinement complete. `17 / 17` tasks done.
+**Overall status:** v1 and observability refinements complete. `18 / 18` tasks done.
 
 ## Suggested milestones
 

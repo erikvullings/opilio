@@ -11,6 +11,8 @@ use crate::service::ServiceState;
 
 use super::{Dashboard, DashboardDevice, DashboardService, DeviceState, MetricSample, Overlay};
 
+const DETAIL_LABEL_WIDTH: usize = 12;
+
 pub fn render(frame: &mut Frame<'_>, dashboard: &Dashboard) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -92,60 +94,86 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         return;
     };
     let chart_height = if inner.height >= 24 { 5 } else { 4 };
-    let detail_height = (5 + device.services.len()).min(9) as u16;
+    let show_power = device.watts.is_some() || !device.watts_history.is_empty();
+    let details = detail_lines(device, show_power);
+    let detail_height = details.len().min(10) as u16;
+    let mut constraints = vec![
+        Constraint::Length(detail_height),
+        Constraint::Length(chart_height),
+        Constraint::Length(1),
+        Constraint::Length(chart_height),
+    ];
+    if show_power {
+        constraints.push(Constraint::Length(chart_height));
+    }
+    constraints.push(Constraint::Min(1));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(detail_height),
-            Constraint::Length(chart_height),
-            Constraint::Length(chart_height),
-            Constraint::Length(chart_height),
-            Constraint::Min(1),
-        ])
+        .constraints(constraints)
         .split(inner);
-    frame.render_widget(Paragraph::new(detail_lines(device)), chunks[0]);
+    frame.render_widget(Paragraph::new(details), chunks[0]);
     metric_history(frame, "RAM used", "%", &device.ram_history, chunks[1], None);
-    metric_history(frame, "GPU busy", "%", &device.gpu_history, chunks[2], None);
-    metric_history(
-        frame,
-        "Power draw",
-        " W",
-        &device.watts_history,
-        chunks[3],
-        Some("No samples - power meter required"),
-    );
+    metric_history(frame, "GPU busy", "%", &device.gpu_history, chunks[3], None);
+    let error_chunk = if show_power {
+        metric_history(
+            frame,
+            "Power draw",
+            " W",
+            &device.watts_history,
+            chunks[4],
+            None,
+        );
+        5
+    } else {
+        4
+    };
     if let Some(error) = &device.recent_failure {
         frame.render_widget(
             Paragraph::new(format!("Recent failure: {error}"))
                 .style(Style::default().fg(Color::Red))
                 .wrap(Wrap { trim: true }),
-            chunks[4],
+            chunks[error_chunk],
         );
     }
 }
 
-fn detail_lines(device: &DashboardDevice) -> Vec<Line<'static>> {
+fn detail_lines(device: &DashboardDevice, show_power: bool) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                device.name.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!("  {}", device.state.label())),
-        ]),
-        Line::from(format!("SSH     {}", device.ssh)),
-        Line::from(format!("RAM used {}", memory_used(device))),
-        Line::from(format!("GPU busy {}", percent(device.gpu_percent))),
-        Line::from(format!(
-            "Power draw {}",
-            device.watts.map_or_else(
-                || "— (power meter required)".to_owned(),
-                |watts| { format!("{watts:.1} W") }
-            )
-        )),
+        detail_row(
+            "Device",
+            vec![
+                Span::styled(
+                    device.name.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("  {}", device.state.label())),
+            ],
+        ),
+        detail_row("SSH", vec![Span::raw(device.ssh.clone())]),
+        detail_row("RAM used", vec![Span::raw(memory_used(device))]),
+        detail_row("GPU busy", vec![Span::raw(percent(device.gpu_percent))]),
     ];
+    if show_power {
+        lines.push(detail_row(
+            "Power draw",
+            vec![Span::raw(device.watts.map_or_else(
+                || "—".to_owned(),
+                |watts| format!("{watts:.1} W"),
+            ))],
+        ));
+    }
     lines.extend(device.services.iter().map(service_line));
+    lines.push(Line::default());
     lines
+}
+
+fn detail_row(label: &str, value: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{label:<DETAIL_LABEL_WIDTH$}"),
+        Style::default().fg(Color::DarkGray),
+    )];
+    spans.extend(value);
+    Line::from(spans)
 }
 
 fn percent(value: Option<f64>) -> String {
@@ -177,11 +205,13 @@ fn service_line(service: &DashboardService) -> Line<'static> {
     } else {
         format!(" - {}", service.models.join(", "))
     };
-    Line::from(format!(
-        "{:<12} {}{models}",
-        service.name,
-        service_label(service.state)
-    ))
+    detail_row(
+        &service.name,
+        vec![Span::raw(format!(
+            "{}{models}",
+            service_label(service.state)
+        ))],
+    )
 }
 
 fn service_label(state: ServiceState) -> &'static str {
