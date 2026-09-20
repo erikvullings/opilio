@@ -4,6 +4,8 @@ use std::{num::NonZeroUsize, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::history::OperationSource;
+
 /// Agentless management for a small flock of machines.
 #[derive(Debug, Parser)]
 #[command(name = "opilio", version, about)]
@@ -11,6 +13,10 @@ pub struct Cli {
     /// Use this configuration file instead of OPILIO_CONFIG or the platform default.
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
+
+    /// Identify the caller in operation history.
+    #[arg(long, global = true, value_enum, default_value = "cli", hide = true)]
+    pub source: OperationSource,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -109,6 +115,16 @@ pub enum Command {
         #[command(subcommand)]
         command: AliasCommand,
     },
+    /// Inspect persistent operation history.
+    History {
+        /// Device, group, site, or `all`.
+        target: Option<String>,
+        #[command(subcommand)]
+        command: Option<HistoryCommand>,
+        /// Emit the stable JSON representation.
+        #[arg(long, global = true)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -186,6 +202,15 @@ pub enum AliasCommand {
         /// Suppress output; use the exit code only.
         #[arg(long, conflicts_with = "json")]
         quiet: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HistoryCommand {
+    /// Show one history record by its stable ID.
+    Show {
+        /// History record ID.
+        id: String,
     },
 }
 

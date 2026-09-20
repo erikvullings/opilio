@@ -6,9 +6,12 @@ description = "Agentless management for a small flock of machines"
 rust-version = "1.85"
 
 [dependencies]
+chrono = { version = "0.4.42", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
 csv = "1.4.0"
+directories = "6.0.0"
 diqwest = { version = "3.2.0", features = ["blocking"] }
+fs2 = "0.4.3"
 humantime = "2.3.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -16,3 +19,4 @@ serde_json = "1.0.149"
 serde_yaml = { package = "serde_yaml_ng", version = "0.10.0" }
 thiserror = "2.0.18"
 url = "2.5.7"
+uuid = { version = "1.18.1", features = ["v4"] }

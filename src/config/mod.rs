@@ -71,6 +71,35 @@ impl Config {
         &self.services
     }
 
+    /// Resolves configured secret references for output redaction.
+    ///
+    /// Missing values are omitted; the owning operation reports missing required secrets.
+    pub(crate) fn resolved_secret_values(&self) -> Vec<String> {
+        let mut values = Vec::new();
+        for device in self.devices.values() {
+            if let Some(crate::domain::PowerProvider::Shelly {
+                auth: Some(auth), ..
+            }) = &device.power
+                && let Ok(value) = env::var(auth.password.environment_variable())
+            {
+                values.push(value);
+            }
+        }
+        for service in self.services.values() {
+            for probe in [service.health.as_ref(), service.info.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                for reference in probe.headers.values() {
+                    if let Ok(value) = env::var(reference.environment_variable()) {
+                        values.push(value);
+                    }
+                }
+            }
+        }
+        values
+    }
+
     pub fn resolve_action(
         &self,
         action_name: &str,

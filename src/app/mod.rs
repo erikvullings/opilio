@@ -1,6 +1,9 @@
 //! Application use cases shared by CLI, TUI, and scheduled invocations.
 
-use std::io::{self, BufRead, Write};
+use std::{
+    io::{self, BufRead, Write},
+    time::Instant,
+};
 
 use crate::{
     action::{
@@ -8,9 +11,17 @@ use crate::{
         write_human as write_action_human, write_json as write_action_json, write_list_human,
     },
     alias::{AliasError, expand_alias},
-    cli::{ActionCommand, AliasCommand, Cli, Command, ConfigCommand, LifecycleCommon, ListCommand},
+    cli::{
+        ActionCommand, AliasCommand, Cli, Command, ConfigCommand, HistoryCommand, LifecycleCommon,
+        ListCommand,
+    },
     config::{Config, ConfigError, config_path},
     domain::Operation,
+    history::{
+        HistoryDetail, HistoryError, HistoryResult, HistoryStore, NewHistoryRecord,
+        OperationSource, Redactor, write_detail_human, write_human as write_history_human,
+        write_json as write_history_json,
+    },
     lifecycle::{
         LifecycleError, LifecycleExecutor, LifecycleOperation, LifecycleRequest,
         SystemLifecycleExecutor, execute_lifecycle, plan_lifecycle,
@@ -21,17 +32,54 @@ use crate::{
         ConfiguredStatusSource, ExitStatus, RuntimeStatusSource, StatusError, StatusRequest,
         StatusSource, collect_status, write_human, write_json,
     },
+    target::TargetError,
     tui,
 };
 
 /// Runs an Opilio invocation.
 pub fn run(cli: Cli) -> Result<ExitStatus, AppError> {
-    execute(cli, &mut io::stdout().lock())
+    let source = cli.source;
+    let redactor = config_path(cli.config.clone())
+        .ok()
+        .and_then(|path| Config::load(&path).ok())
+        .map_or_else(Redactor::default, |config| {
+            Redactor::new(config.resolved_secret_values())
+        });
+    let history = HistoryStore::platform_default(redactor)?;
+    execute_with_history(cli, &mut io::stdout().lock(), source, &history)
 }
 
 /// Executes a parsed CLI invocation against shared application APIs.
 pub fn execute(cli: Cli, output: &mut dyn Write) -> Result<ExitStatus, AppError> {
-    execute_with_status_source(cli, output, &RuntimeStatusSource)
+    execute_with_adapters(
+        cli,
+        output,
+        &RuntimeStatusSource,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Executes an invocation and records operations in the supplied history store.
+pub fn execute_with_history(
+    cli: Cli,
+    output: &mut dyn Write,
+    source: OperationSource,
+    history: &HistoryStore,
+) -> Result<ExitStatus, AppError> {
+    execute_with_adapters(
+        cli,
+        output,
+        &RuntimeStatusSource,
+        None,
+        None,
+        None,
+        None,
+        Some(HistoryContext { source, history }),
+    )
 }
 
 /// Executes a parsed invocation with an injectable status boundary.
@@ -40,7 +88,7 @@ pub fn execute_with_status_source(
     output: &mut dyn Write,
     status_source: &dyn StatusSource,
 ) -> Result<ExitStatus, AppError> {
-    execute_with_adapters(cli, output, status_source, None, None, None, None)
+    execute_with_adapters(cli, output, status_source, None, None, None, None, None)
 }
 
 /// Executes a parsed invocation with an injectable interactive OpenSSH boundary.
@@ -54,6 +102,7 @@ pub fn execute_with_ssh(
         output,
         &ConfiguredStatusSource,
         Some(ssh),
+        None,
         None,
         None,
         None,
@@ -74,6 +123,27 @@ pub fn execute_with_action_executor(
         Some(executor),
         None,
         None,
+        None,
+    )
+}
+
+/// Executes a named action with a fakeable boundary and persistent history.
+pub fn execute_with_action_executor_and_history(
+    cli: Cli,
+    output: &mut dyn Write,
+    executor: &dyn ActionExecutor,
+    source: OperationSource,
+    history: &HistoryStore,
+) -> Result<ExitStatus, AppError> {
+    execute_with_adapters(
+        cli,
+        output,
+        &ConfiguredStatusSource,
+        None,
+        Some(executor),
+        None,
+        None,
+        Some(HistoryContext { source, history }),
     )
 }
 
@@ -92,9 +162,17 @@ pub fn execute_with_lifecycle_executor(
         None,
         Some(executor),
         Some(confirmation),
+        None,
     )
 }
 
+#[derive(Clone, Copy)]
+struct HistoryContext<'a> {
+    source: OperationSource,
+    history: &'a HistoryStore,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_with_adapters(
     cli: Cli,
     output: &mut dyn Write,
@@ -103,6 +181,7 @@ fn execute_with_adapters(
     action_executor: Option<&dyn ActionExecutor>,
     lifecycle_executor: Option<&dyn LifecycleExecutor>,
     confirmation: Option<&dyn Confirmation>,
+    history: Option<HistoryContext<'_>>,
 ) -> Result<ExitStatus, AppError> {
     let Some(command) = cli.command else {
         tui::run().map_err(AppError::Io)?;
@@ -118,11 +197,54 @@ fn execute_with_adapters(
                     "`{device}` is not a device; `opilio ssh` rejects groups and sites"
                 ))
             })?;
-            let exit_code = if let Some(ssh) = ssh {
-                ssh.interactive(&configured_device.ssh)?
+            let started = Instant::now();
+            let result = if let Some(ssh) = ssh {
+                ssh.interactive(&configured_device.ssh)
             } else {
-                OpenSsh::system()?.interactive(&configured_device.ssh)?
+                OpenSsh::system()?.interactive(&configured_device.ssh)
             };
+            let exit_code = match result {
+                Ok(exit_code) => exit_code,
+                Err(error) => {
+                    if let Some(history) = history {
+                        history.history.append(NewHistoryRecord {
+                            source: history.source,
+                            operation: "ssh".to_owned(),
+                            action: None,
+                            requested_target: device.clone(),
+                            resolved_device: device,
+                            duration_ms: elapsed_millis(started),
+                            result: HistoryResult::Failed,
+                            exit_code: None,
+                            force: false,
+                            stdout: None,
+                            stderr: None,
+                            error: Some(error.to_string()),
+                        })?;
+                    }
+                    return Err(error.into());
+                }
+            };
+            if let Some(history) = history {
+                history.history.append(NewHistoryRecord {
+                    source: history.source,
+                    operation: "ssh".to_owned(),
+                    action: None,
+                    requested_target: device.clone(),
+                    resolved_device: device,
+                    duration_ms: elapsed_millis(started),
+                    result: if exit_code == 0 {
+                        HistoryResult::Succeeded
+                    } else {
+                        HistoryResult::Failed
+                    },
+                    exit_code: Some(exit_code),
+                    force: false,
+                    stdout: None,
+                    stderr: None,
+                    error: (exit_code != 0).then(|| format!("interactive SSH exited {exit_code}")),
+                })?;
+            }
             Ok(if exit_code == 0 {
                 ExitStatus::Success
             } else {
@@ -138,6 +260,7 @@ fn execute_with_adapters(
             output,
             lifecycle_executor,
             confirmation,
+            history,
         ),
         Command::Off { common, force } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -148,6 +271,7 @@ fn execute_with_adapters(
             output,
             lifecycle_executor,
             confirmation,
+            history,
         ),
         Command::Shutdown { common } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -158,6 +282,7 @@ fn execute_with_adapters(
             output,
             lifecycle_executor,
             confirmation,
+            history,
         ),
         Command::Reboot { common } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -168,6 +293,7 @@ fn execute_with_adapters(
             output,
             lifecycle_executor,
             confirmation,
+            history,
         ),
         Command::PowerOff { common, force } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -178,6 +304,7 @@ fn execute_with_adapters(
             output,
             lifecycle_executor,
             confirmation,
+            history,
         ),
         Command::PowerCycle { common, force } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -188,6 +315,7 @@ fn execute_with_adapters(
             output,
             lifecycle_executor,
             confirmation,
+            history,
         ),
         Command::Status {
             target,
@@ -202,6 +330,7 @@ fn execute_with_adapters(
             quiet,
             output,
             status_source,
+            history,
         ),
         Command::Config {
             command: ConfigCommand::Path,
@@ -258,6 +387,7 @@ fn execute_with_adapters(
                 },
         } => {
             let config = Config::load(&path)?;
+            let started = Instant::now();
             let request = ActionRequest {
                 name,
                 target,
@@ -269,6 +399,9 @@ fn execute_with_adapters(
                 let ssh = OpenSsh::system()?;
                 run_action(&config, request, &ssh)?
             };
+            if let Some(history) = history {
+                record_action_history(history, &report, elapsed_millis(started))?;
+            }
             if !quiet {
                 if json {
                     write_action_json(output, &report)?;
@@ -292,6 +425,7 @@ fn execute_with_adapters(
                     quiet,
                     output,
                     status_source,
+                    history,
                 ),
                 operation => {
                     let lifecycle_operation = lifecycle_operation(operation)?;
@@ -308,9 +442,53 @@ fn execute_with_adapters(
                         output,
                         lifecycle_executor,
                         confirmation,
+                        history,
                     )
                 }
             }
+        }
+        Command::History {
+            target,
+            command,
+            json,
+        } => {
+            let owned_history;
+            let history = if let Some(history) = history {
+                history.history
+            } else {
+                owned_history = HistoryStore::platform_default(Redactor::default())?;
+                &owned_history
+            };
+            match command {
+                Some(HistoryCommand::Show { id }) => {
+                    let (record, warnings) = history.show(&id)?;
+                    let detail = HistoryDetail {
+                        schema_version: 1,
+                        record,
+                        warnings,
+                    };
+                    if json {
+                        write_history_json(output, &detail)?;
+                    } else {
+                        write_detail_human(output, &detail)?;
+                    }
+                }
+                None => {
+                    let listing = if let Some(target) = target {
+                        let config = Config::load(&path)?;
+                        let devices = crate::target::Target::resolve(&target, &config)?;
+                        history.list_for_target(&target, &devices)?
+                    } else {
+                        history.list(None)?
+                    };
+                    if json {
+                        write_history_json(output, &listing)?;
+                    } else {
+                        write_history_human(output, &listing)?;
+                    }
+                }
+            }
+            Ok(ExitStatus::Success)
         }
     }
 }
@@ -325,6 +503,7 @@ fn execute_lifecycle_command(
     output: &mut dyn Write,
     executor: Option<&dyn LifecycleExecutor>,
     confirmation: Option<&dyn Confirmation>,
+    history: Option<HistoryContext<'_>>,
 ) -> Result<ExitStatus, AppError> {
     execute_lifecycle_values(
         config,
@@ -339,6 +518,7 @@ fn execute_lifecycle_command(
         output,
         executor,
         confirmation,
+        history,
     )
 }
 
@@ -356,7 +536,10 @@ fn execute_lifecycle_values(
     output: &mut dyn Write,
     executor: Option<&dyn LifecycleExecutor>,
     confirmation: Option<&dyn Confirmation>,
+    history: Option<HistoryContext<'_>>,
 ) -> Result<ExitStatus, AppError> {
+    let requested_target = target.clone();
+    let started = Instant::now();
     let mut plan = plan_lifecycle(
         config,
         LifecycleRequest {
@@ -392,6 +575,15 @@ fn execute_lifecycle_values(
         &system_executor
     };
     let report = execute_lifecycle(config, plan, executor)?;
+    if let Some(history) = history {
+        record_lifecycle_history(
+            history,
+            &report,
+            &requested_target,
+            force,
+            elapsed_millis(started),
+        )?;
+    }
     if !quiet {
         if json {
             write_lifecycle_json(output, &report)?;
@@ -442,6 +634,7 @@ impl Confirmation for StdinConfirmation {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_status(
     config: &Config,
     target: String,
@@ -450,7 +643,9 @@ fn execute_status(
     quiet: bool,
     output: &mut dyn Write,
     status_source: &dyn StatusSource,
+    history: Option<HistoryContext<'_>>,
 ) -> Result<ExitStatus, AppError> {
+    let started = Instant::now();
     let report = collect_status(
         config,
         StatusRequest {
@@ -459,6 +654,9 @@ fn execute_status(
         },
         status_source,
     )?;
+    if let Some(history) = history {
+        record_status_history(history, &report, elapsed_millis(started))?;
+    }
     if !quiet {
         if json {
             write_json(output, &report)?;
@@ -467,6 +665,99 @@ fn execute_status(
         }
     }
     Ok(report.exit_status())
+}
+
+fn record_action_history(
+    context: HistoryContext<'_>,
+    report: &crate::action::ActionReport,
+    duration_ms: u64,
+) -> Result<(), HistoryError> {
+    for result in &report.devices {
+        let succeeded = result.status == crate::action::ActionState::Succeeded;
+        context.history.append(NewHistoryRecord {
+            source: context.source,
+            operation: "action".to_owned(),
+            action: Some(report.action.clone()),
+            requested_target: report.target.clone(),
+            resolved_device: result.device.clone(),
+            duration_ms,
+            result: if succeeded {
+                HistoryResult::Succeeded
+            } else {
+                HistoryResult::Failed
+            },
+            exit_code: result.exit_code,
+            force: false,
+            stdout: Some(result.stdout.clone()),
+            stderr: Some(result.stderr.clone()),
+            error: result.error.clone(),
+        })?;
+    }
+    Ok(())
+}
+
+fn record_lifecycle_history(
+    context: HistoryContext<'_>,
+    report: &crate::lifecycle::LifecycleReport,
+    requested_target: &str,
+    force: bool,
+    duration_ms: u64,
+) -> Result<(), HistoryError> {
+    for result in &report.devices {
+        let succeeded = result.status == crate::lifecycle::LifecycleResultStatus::Succeeded;
+        context.history.append(NewHistoryRecord {
+            source: context.source,
+            operation: report.operation.to_string(),
+            action: None,
+            requested_target: requested_target.to_owned(),
+            resolved_device: result.device.clone(),
+            duration_ms,
+            result: if succeeded {
+                HistoryResult::Succeeded
+            } else {
+                HistoryResult::Failed
+            },
+            exit_code: Some(if succeeded { 0 } else { 1 }),
+            force,
+            stdout: None,
+            stderr: None,
+            error: result.error.clone(),
+        })?;
+    }
+    Ok(())
+}
+
+fn record_status_history(
+    context: HistoryContext<'_>,
+    report: &crate::status::StatusReport,
+    duration_ms: u64,
+) -> Result<(), HistoryError> {
+    for result in &report.devices {
+        let succeeded = result.status != crate::status::StatusState::Failed;
+        context.history.append(NewHistoryRecord {
+            source: context.source,
+            operation: "status".to_owned(),
+            action: None,
+            requested_target: report.target.clone(),
+            resolved_device: result.device.clone(),
+            duration_ms,
+            result: if succeeded {
+                HistoryResult::Succeeded
+            } else {
+                HistoryResult::Failed
+            },
+            exit_code: Some(if succeeded { 0 } else { 1 }),
+            force: false,
+            stdout: None,
+            stderr: None,
+            error: result.error.clone(),
+        })?;
+    }
+    Ok(())
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn write_names<'a>(
@@ -491,6 +782,10 @@ pub enum AppError {
     Alias(#[from] AliasError),
     #[error(transparent)]
     Lifecycle(#[from] LifecycleError),
+    #[error(transparent)]
+    Target(#[from] TargetError),
+    #[error(transparent)]
+    History(#[from] HistoryError),
     #[error("could not read confirmation: {0}")]
     Confirmation(String),
     #[error("operation cancelled")]
@@ -511,8 +806,14 @@ impl AppError {
             | Self::Action(_)
             | Self::Alias(_)
             | Self::Lifecycle(_)
+            | Self::Target(_)
+            | Self::History(HistoryError::NotFound(_) | HistoryError::InvalidConfig(_))
             | Self::SshTarget(_) => ExitStatus::ConfigOrUsage.code(),
-            Self::Ssh(_) | Self::Confirmation(_) | Self::ConfirmationDeclined | Self::Io(_) => 1,
+            Self::History(_)
+            | Self::Ssh(_)
+            | Self::Confirmation(_)
+            | Self::ConfirmationDeclined
+            | Self::Io(_) => 1,
         }
     }
 }

@@ -24,14 +24,14 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0008 Safe lifecycle operations](TASKS/0008-safe-lifecycle-operations.md) | done | 0004, 0006, 0007 | on/off/reboot/power-cycle safety semantics |
 | [0009 System and NVIDIA telemetry](TASKS/0009-system-and-nvidia-telemetry.md) | done | 0004 | CPU/RAM/GPU + DGX Spark UMA-aware telemetry |
 | [0010 Generic service health](TASKS/0010-generic-service-health.md) | done | 0004 | Generic health/status/info incl. LLM model name |
-| [0011 Operation history and logging](TASKS/0011-operation-history-and-logging.md) | open | 0005, 0008 | Rotating JSONL history + bounded failure output |
+| [0011 Operation history and logging](TASKS/0011-operation-history-and-logging.md) | done | 0005, 0008 | Rotating JSONL history + bounded failure output |
 | [0012 Build the TUI dashboard](TASKS/0012-build-tui-dashboard.md) | open | 0008, 0009, 0010, 0011 | Keyboard-first live fleet dashboard |
 | [0013 Diagnostics and doctor](TASKS/0013-diagnostics-and-doctor.md) | open | 0006, 0007, 0009, 0010 | Static config check + runtime diagnostics |
 | [0014 Native scheduling adapters](TASKS/0014-native-scheduling-adapters.md) | open | 0005, 0011 | Linux/macOS/Windows schedule ls/add/rm |
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `10 / 16` tasks done.
+**Overall status:** implementation in progress. `11 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -82,6 +82,8 @@ opilio action ls
 opilio action run <name> <device|group|site|all> [--parallel N]
 opilio alias run <name>
 opilio ssh <device>
+opilio history [device|group|site|all] [--json]
+opilio history show <id> [--json]
 ```
 
 `config check` only parses and statically validates configuration. It performs
@@ -155,6 +157,21 @@ target, and options. Aliases cannot reference aliases or contain workflow
 steps. Read-only status aliases default to four workers; disruptive aliases
 default to one. Lifecycle aliases use the same confirmation, safety, execution,
 and result path as direct lifecycle commands.
+
+CLI operations append one JSONL history record per resolved device in the
+platform-local Opilio data directory. Records include a stable ID, timestamp,
+source, operation/action, requested and resolved targets, duration, result,
+exit code, and force flag. Successful remote output is never stored. Failed
+stdout, stderr, and errors are redacted and retain only a UTF-8-safe tail
+(64 KiB by default). `history` reports malformed or truncated records instead
+of treating them as successful operations. Rotation defaults to four 4 MiB
+files and uses a cross-process lock.
+
+History storage can be tuned with `OPILIO_HISTORY_DIR`,
+`OPILIO_HISTORY_MAX_FILE_BYTES`, `OPILIO_HISTORY_MAX_FILES`, and
+`OPILIO_HISTORY_FAILURE_TAIL_BYTES`. Native scheduler integrations can pass the
+hidden global `--source scheduled` option; shared TUI/library callers use the
+typed `OperationSource` API.
 
 Command exit codes are `0` for success, `1` when all device work fails, `2` for
 configuration or usage errors, and `3` for partial success. Group, site, and
