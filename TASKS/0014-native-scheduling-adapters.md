@@ -1,6 +1,6 @@
 # 0014 — Native scheduling adapters
 
-**Status:** open  
+**Status:** done
 **Depends on:** 0005, 0011  
 **Spec:** `docs/OPILIO_V1_SPEC.md`
 
@@ -40,16 +40,32 @@ This is a resumable Opilio v1 task. Read the product spec and `AGENTS.md` before
 
 ## Progress
 
-- [ ] Task picked up; status changed to `in-progress` in this file and root README.
-- [ ] Implementation completed.
-- [ ] Focused tests pass.
-- [ ] Full relevant test suite/lints pass.
-- [ ] Documentation/examples updated if behavior is user-visible.
-- [ ] Status changed to `done` and root README dashboard updated.
+- [x] Task picked up; status changed to `in-progress` in this file and root README.
+- [x] Implementation completed.
+- [x] Focused tests pass.
+- [x] Full relevant test suite/lints pass.
+- [x] Documentation/examples updated if behavior is user-visible.
+- [x] Status changed to `done` and root README dashboard updated.
+
+## Decisions
+
+- `schedule add` uses a stable, user-selected lowercase ID and a portable daily
+  local time (`HH:MM`); native missed-run behavior is preserved.
+- A private ownership registry plus markers in every native artifact/cron line
+  forms the authority for listing and removal. Missing or changed artifacts are
+  reported as partial listing warnings; foreign entries are ignored.
+- Scheduled commands are parsed through the normal CLI and restricted to
+  status, lifecycle, named-action, and alias execution.
 
 ## Validation
 
-Record commands/tests and concise results here before marking done.
+- `cargo test --test scheduler --test cli_scheduler --quiet` — 8
+  task-specific public-interface tests passed.
+- Focused scheduled-confirmation and native-registry ownership tests — 2 passed.
+- `cargo check --all-targets --all-features` — passed.
+- `cargo fmt --all --check` — passed.
+- `cargo test --all-targets --all-features` — full suite passed (146 tests).
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 
 ## Blockers / decisions needed
 
@@ -57,4 +73,11 @@ None currently.
 
 ## Notes / handoff
 
-Add anything a fresh agent needs to resume this task.
+- 2026-09-20 Copilot: Added the shared native scheduler API and complete
+  `schedule ls/add/rm` CLI with stable human/JSON output, owned metadata,
+  systemd user timers with safe cron fallback, launchd plists, and Windows Task
+  Scheduler XML. Scheduled operation/alias commands use absolute executable and
+  config paths, source history as `scheduled`, and skip collection prompts
+  without weakening force checks. Added portable artifact/quoting tests, fake
+  add/list/remove tests, partial-list diagnostics, and non-owned removal denial.
+  All focused/full validation passed; no known task-scope limitations.

@@ -4,7 +4,7 @@ use std::{num::NonZeroUsize, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::history::OperationSource;
+use crate::{history::OperationSource, scheduler::AtTime};
 
 /// Agentless management for a small flock of machines.
 #[derive(Debug, Parser)]
@@ -126,6 +126,11 @@ pub enum Command {
         #[command(subcommand)]
         command: AliasCommand,
     },
+    /// Manage Opilio-owned native scheduled jobs.
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommand,
+    },
     /// Inspect persistent operation history.
     History {
         /// Device, group, site, or `all`.
@@ -208,6 +213,49 @@ pub enum AliasCommand {
         /// Configured alias name.
         name: String,
         /// Emit the operation's stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ScheduleCommand {
+    /// List Opilio-owned scheduled jobs.
+    #[command(name = "ls")]
+    List {
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
+    /// Add a daily native scheduled job.
+    Add {
+        /// Stable lowercase identifier for the job.
+        id: String,
+        /// Local daily execution time in HH:MM form.
+        #[arg(long, value_name = "HH:MM")]
+        at: AtTime,
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+        /// Deterministic Opilio operation after `--`.
+        #[arg(last = true, required = true, num_args = 1..)]
+        operation: Vec<String>,
+    },
+    /// Remove an Opilio-owned scheduled job.
+    #[command(name = "rm")]
+    Remove {
+        /// Stable schedule identifier.
+        id: String,
+        /// Emit the stable JSON representation.
         #[arg(long, conflicts_with = "quiet")]
         json: bool,
         /// Suppress output; use the exit code only.

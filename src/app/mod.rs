@@ -13,7 +13,7 @@ use crate::{
     alias::{AliasError, expand_alias},
     cli::{
         ActionCommand, AliasCommand, Cli, Command, ConfigCommand, HistoryCommand, LifecycleCommon,
-        ListCommand,
+        ListCommand, ScheduleCommand as CliScheduleCommand,
     },
     config::{Config, ConfigError, config_path},
     doctor::{
@@ -30,6 +30,10 @@ use crate::{
         LifecycleError, LifecycleExecutor, LifecycleOperation, LifecycleRequest,
         SystemLifecycleExecutor, execute_lifecycle, plan_lifecycle,
         write_human as write_lifecycle_human, write_json as write_lifecycle_json,
+    },
+    scheduler::{
+        AddSchedule, NativeScheduler, ScheduleCommand, ScheduleError, ScheduleId, ScheduleMutation,
+        Scheduler, write_json as write_schedule_json, write_listing_human,
     },
     ssh::{InteractiveSsh, OpenSsh, SshError},
     status::{
@@ -66,6 +70,7 @@ pub fn execute(cli: Cli, output: &mut dyn Write) -> Result<ExitStatus, AppError>
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -87,6 +92,7 @@ pub fn execute_with_history(
         None,
         None,
         Some(HistoryContext { source, history }),
+        None,
     )
 }
 
@@ -100,6 +106,7 @@ pub fn execute_with_status_source(
         cli,
         output,
         status_source,
+        None,
         None,
         None,
         None,
@@ -125,6 +132,7 @@ pub fn execute_with_doctor_probe(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -140,6 +148,7 @@ pub fn execute_with_ssh(
         &ConfiguredStatusSource,
         None,
         Some(ssh),
+        None,
         None,
         None,
         None,
@@ -160,6 +169,7 @@ pub fn execute_with_action_executor(
         None,
         None,
         Some(executor),
+        None,
         None,
         None,
         None,
@@ -184,6 +194,7 @@ pub fn execute_with_action_executor_and_history(
         None,
         None,
         Some(HistoryContext { source, history }),
+        None,
     )
 }
 
@@ -204,6 +215,27 @@ pub fn execute_with_lifecycle_executor(
         Some(executor),
         Some(confirmation),
         None,
+        None,
+    )
+}
+
+/// Executes schedule commands with an injectable native scheduler boundary.
+pub fn execute_with_scheduler(
+    cli: Cli,
+    output: &mut dyn Write,
+    scheduler: &dyn Scheduler,
+) -> Result<ExitStatus, AppError> {
+    execute_with_adapters(
+        cli,
+        output,
+        &ConfiguredStatusSource,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(scheduler),
     )
 }
 
@@ -224,7 +256,9 @@ fn execute_with_adapters(
     lifecycle_executor: Option<&dyn LifecycleExecutor>,
     confirmation: Option<&dyn Confirmation>,
     history: Option<HistoryContext<'_>>,
+    scheduler: Option<&dyn Scheduler>,
 ) -> Result<ExitStatus, AppError> {
+    let invocation_source = cli.source;
     let Some(command) = cli.command else {
         let path = config_path(cli.config)?;
         tui::run(Config::load(&path)?).map_err(AppError::Io)?;
@@ -304,6 +338,7 @@ fn execute_with_adapters(
             lifecycle_executor,
             confirmation,
             history,
+            invocation_source == OperationSource::Scheduled,
         ),
         Command::Off { common, force } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -315,6 +350,7 @@ fn execute_with_adapters(
             lifecycle_executor,
             confirmation,
             history,
+            invocation_source == OperationSource::Scheduled,
         ),
         Command::Shutdown { common } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -326,6 +362,7 @@ fn execute_with_adapters(
             lifecycle_executor,
             confirmation,
             history,
+            invocation_source == OperationSource::Scheduled,
         ),
         Command::Reboot { common } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -337,6 +374,7 @@ fn execute_with_adapters(
             lifecycle_executor,
             confirmation,
             history,
+            invocation_source == OperationSource::Scheduled,
         ),
         Command::PowerOff { common, force } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -348,6 +386,7 @@ fn execute_with_adapters(
             lifecycle_executor,
             confirmation,
             history,
+            invocation_source == OperationSource::Scheduled,
         ),
         Command::PowerCycle { common, force } => execute_lifecycle_command(
             &Config::load(&path)?,
@@ -359,6 +398,7 @@ fn execute_with_adapters(
             lifecycle_executor,
             confirmation,
             history,
+            invocation_source == OperationSource::Scheduled,
         ),
         Command::Status {
             target,
@@ -503,7 +543,7 @@ fn execute_with_adapters(
                         alias.parallelism,
                         alias.wait,
                         alias.force,
-                        false,
+                        invocation_source == OperationSource::Scheduled,
                         json,
                         quiet,
                         output,
@@ -511,6 +551,82 @@ fn execute_with_adapters(
                         confirmation,
                         history,
                     )
+                }
+            }
+        }
+        Command::Schedule { command } => {
+            let native;
+            let scheduler = if let Some(scheduler) = scheduler {
+                scheduler
+            } else {
+                native = NativeScheduler::platform_default()?;
+                &native
+            };
+            match command {
+                CliScheduleCommand::List { json, quiet } => {
+                    let listing = scheduler.list()?;
+                    if !quiet {
+                        if json {
+                            write_schedule_json(output, &listing)?;
+                        } else {
+                            write_listing_human(output, &listing)?;
+                        }
+                    }
+                    Ok(if listing.warnings.is_empty() {
+                        ExitStatus::Success
+                    } else if listing.jobs.is_empty() {
+                        ExitStatus::Failed
+                    } else {
+                        ExitStatus::PartialSuccess
+                    })
+                }
+                CliScheduleCommand::Add {
+                    id,
+                    at,
+                    json,
+                    quiet,
+                    operation,
+                } => {
+                    Config::load(&path)?;
+                    let config = std::fs::canonicalize(&path).map_err(ScheduleError::Io)?;
+                    let job = scheduler.add(AddSchedule {
+                        id: ScheduleId::new(id)?,
+                        at,
+                        command: ScheduleCommand::new(operation)?,
+                        executable: std::env::current_exe().map_err(ScheduleError::Io)?,
+                        config,
+                    })?;
+                    if !quiet {
+                        if json {
+                            write_schedule_json(
+                                output,
+                                &ScheduleMutation {
+                                    schema_version: 1,
+                                    job,
+                                },
+                            )?;
+                        } else {
+                            writeln!(output, "added {} at {}", job.id, job.at)?;
+                        }
+                    }
+                    Ok(ExitStatus::Success)
+                }
+                CliScheduleCommand::Remove { id, json, quiet } => {
+                    let job = scheduler.remove(&ScheduleId::new(id)?)?;
+                    if !quiet {
+                        if json {
+                            write_schedule_json(
+                                output,
+                                &ScheduleMutation {
+                                    schema_version: 1,
+                                    job,
+                                },
+                            )?;
+                        } else {
+                            writeln!(output, "removed {}", job.id)?;
+                        }
+                    }
+                    Ok(ExitStatus::Success)
                 }
             }
         }
@@ -571,6 +687,7 @@ fn execute_lifecycle_command(
     executor: Option<&dyn LifecycleExecutor>,
     confirmation: Option<&dyn Confirmation>,
     history: Option<HistoryContext<'_>>,
+    inherently_confirmed: bool,
 ) -> Result<ExitStatus, AppError> {
     execute_lifecycle_values(
         config,
@@ -579,7 +696,7 @@ fn execute_lifecycle_command(
         common.parallel,
         wait,
         force,
-        common.yes,
+        common.yes || inherently_confirmed,
         common.json,
         common.quiet,
         output,
@@ -855,6 +972,8 @@ pub enum AppError {
     Target(#[from] TargetError),
     #[error(transparent)]
     History(#[from] HistoryError),
+    #[error(transparent)]
+    Schedule(#[from] ScheduleError),
     #[error("could not read confirmation: {0}")]
     Confirmation(String),
     #[error("operation cancelled")]
@@ -878,8 +997,19 @@ impl AppError {
             | Self::Lifecycle(_)
             | Self::Target(_)
             | Self::History(HistoryError::NotFound(_) | HistoryError::InvalidConfig(_))
+            | Self::Schedule(
+                ScheduleError::InvalidId(_)
+                | ScheduleError::InvalidTime(_)
+                | ScheduleError::InvalidCommand(_)
+                | ScheduleError::InvalidPath(_)
+                | ScheduleError::AlreadyExists(_)
+                | ScheduleError::NotOwned(_)
+                | ScheduleError::UnsupportedPlatform(_)
+                | ScheduleError::DataDirectoryUnavailable,
+            )
             | Self::SshTarget(_) => ExitStatus::ConfigOrUsage.code(),
             Self::History(_)
+            | Self::Schedule(_)
             | Self::Ssh(_)
             | Self::Confirmation(_)
             | Self::ConfirmationDeclined

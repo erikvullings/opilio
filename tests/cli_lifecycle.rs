@@ -245,3 +245,38 @@ fn lifecycle_aliases_use_the_same_confirmation_and_execution_path() {
     assert_eq!(executor.calls.lock().unwrap().len(), 2);
     assert_eq!(confirmation.prompts.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn scheduled_collection_commands_and_aliases_are_inherently_confirmed() {
+    for command in [
+        vec!["reboot", "fleet", "--quiet"],
+        vec!["alias", "run", "restart-fleet", "--quiet"],
+    ] {
+        let path = config_path();
+        let executor = FakeExecutor::default();
+        let confirmation = FakeConfirmation {
+            answer: false,
+            prompts: Mutex::new(Vec::new()),
+        };
+        let mut args = vec![
+            "opilio",
+            "--config",
+            path.to_str().unwrap(),
+            "--source",
+            "scheduled",
+        ];
+        args.extend(command);
+
+        let status = app::execute_with_lifecycle_executor(
+            Cli::try_parse_from(args).unwrap(),
+            &mut Vec::new(),
+            &executor,
+            &confirmation,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitStatus::Success);
+        assert_eq!(executor.calls.lock().unwrap().len(), 2);
+        assert!(confirmation.prompts.lock().unwrap().is_empty());
+    }
+}

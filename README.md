@@ -27,11 +27,11 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0011 Operation history and logging](TASKS/0011-operation-history-and-logging.md) | done | 0005, 0008 | Rotating JSONL history + bounded failure output |
 | [0012 Build the TUI dashboard](TASKS/0012-build-tui-dashboard.md) | done | 0008, 0009, 0010, 0011 | Keyboard-first live fleet dashboard |
 | [0013 Diagnostics and doctor](TASKS/0013-diagnostics-and-doctor.md) | done | 0006, 0007, 0009, 0010 | Static config check + runtime diagnostics |
-| [0014 Native scheduling adapters](TASKS/0014-native-scheduling-adapters.md) | open | 0005, 0011 | Linux/macOS/Windows schedule ls/add/rm |
+| [0014 Native scheduling adapters](TASKS/0014-native-scheduling-adapters.md) | done | 0005, 0011 | Linux/macOS/Windows schedule ls/add/rm |
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `13 / 16` tasks done.
+**Overall status:** implementation in progress. `14 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -82,6 +82,9 @@ opilio site ls
 opilio action ls
 opilio action run <name> <device|group|site|all> [--parallel N]
 opilio alias run <name>
+opilio schedule ls [--json]
+opilio schedule add <id> --at HH:MM [--json] -- <operation...>
+opilio schedule rm <id> [--json]
 opilio ssh <device>
 opilio history [device|group|site|all] [--json]
 opilio history show <id> [--json]
@@ -191,6 +194,16 @@ History storage can be tuned with `OPILIO_HISTORY_DIR`,
 `OPILIO_HISTORY_FAILURE_TAIL_BYTES`. Native scheduler integrations can pass the
 hidden global `--source scheduled` option; shared TUI/library callers use the
 typed `OperationSource` API.
+
+`schedule add` installs a daily, local-time job using a systemd user timer on
+Linux when the user manager is available (otherwise the existing crontab),
+launchd on macOS, or Task Scheduler on Windows. The command after `--` must be
+a deterministic operation (`status`, lifecycle, `action run`, or `alias run`);
+interactive SSH and scheduler recursion are rejected. Scheduled operations run
+with the selected absolute config path, are inherently confirmed, and record
+history with source `scheduled`. Opilio marks and tracks its native artifacts,
+lists/removes only those jobs, and delegates missed runs to the native
+scheduler without catch-up logic.
 
 Command exit codes are `0` for success, `1` when all device work fails, `2` for
 configuration or usage errors, and `3` for partial success. Group, site, and
