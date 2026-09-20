@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 pub mod domain;
 pub mod history;
+pub mod lifecycle;
 pub mod power;
 pub mod scheduler;
 pub mod service;

@@ -1,6 +1,6 @@
 # 0008 — Safe lifecycle operations
 
-**Status:** open  
+**Status:** done
 **Depends on:** 0004, 0006, 0007  
 **Spec:** `docs/OPILIO_V1_SPEC.md`
 
@@ -38,18 +38,36 @@ This is a resumable Opilio v1 task. Read the product spec and `AGENTS.md` before
 - Treat JSON output and secret redaction as compatibility/security surfaces where applicable.
 - Add dependencies only when they are maintained and materially reduce complexity.
 
+## Decisions
+
+- Lifecycle requests first produce a per-device safety plan. Frontends must
+  explicitly confirm collection operations and every forced operation before
+  executing that plan; scheduled callers use the same API with confirmation
+  already recorded.
+- `power-off` and `power-cycle` require `--force`. `off --force` bypasses SSH
+  shutdown and waiting; normal `off` cuts Shelly power only after successful
+  graceful shutdown and shutdown detection when `shutdown.cut_power` is true.
+- Successful requests report transition states rather than inferred steady
+  state: `booting`, `ssh_ready`, `shutting_down`, `rebooting`, `powered_off`,
+  or `unreachable`. Failures remain `unknown`.
+
 ## Progress
 
-- [ ] Task picked up; status changed to `in-progress` in this file and root README.
-- [ ] Implementation completed.
-- [ ] Focused tests pass.
-- [ ] Full relevant test suite/lints pass.
-- [ ] Documentation/examples updated if behavior is user-visible.
-- [ ] Status changed to `done` and root README dashboard updated.
+- [x] Task picked up; status changed to `in-progress` in this file and root README.
+- [x] Implementation completed.
+- [x] Focused tests pass.
+- [x] Full relevant test suite/lints pass.
+- [x] Documentation/examples updated if behavior is user-visible.
+- [x] Status changed to `done` and root README dashboard updated.
 
 ## Validation
 
-Record commands/tests and concise results here before marking done.
+- `cargo test --test lifecycle --test cli_lifecycle --quiet` — 18 focused
+  public-interface lifecycle/planning/CLI tests passed.
+- `cargo check --all-targets --all-features` — passed without warnings.
+- `cargo fmt --all -- --check` — passed.
+- `cargo test --all-targets --all-features` — full suite passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 
 ## Blockers / decisions needed
 
@@ -57,4 +75,9 @@ None currently.
 
 ## Notes / handoff
 
-Add anything a fresh agent needs to resume this task.
+- 2026-09-20 Copilot: Added shared lifecycle safety planning/execution, typed
+  truthful transition reports, production OpenSSH/Shelly/WoL orchestration,
+  bounded concurrency and continuation, interactive/explicit confirmation,
+  force-only bypass/cut/cycle paths, CLI and lifecycle-alias dispatch, and
+  stable human/JSON output. Verified 18 task-focused tests, full suite, check,
+  formatting, and strict clippy; no known task-scope limitations.

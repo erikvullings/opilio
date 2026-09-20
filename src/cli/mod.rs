@@ -2,7 +2,7 @@
 
 use std::{num::NonZeroUsize, path::PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// Agentless management for a small flock of machines.
 #[derive(Debug, Parser)]
@@ -22,6 +22,48 @@ pub enum Command {
     Ssh {
         /// Configured Opilio device name.
         device: String,
+    },
+    /// Request power-on and optionally wait for SSH readiness.
+    On {
+        #[command(flatten)]
+        common: LifecycleCommon,
+        /// Wait until SSH is available; does not wait for services or models.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Gracefully shut down, wait, then cut configured Shelly power.
+    Off {
+        #[command(flatten)]
+        common: LifecycleCommon,
+        /// Bypass graceful shutdown and authorize an immediate physical cut.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Request graceful OS shutdown over SSH.
+    Shutdown {
+        #[command(flatten)]
+        common: LifecycleCommon,
+    },
+    /// Request an OS reboot over SSH.
+    Reboot {
+        #[command(flatten)]
+        common: LifecycleCommon,
+    },
+    /// Cut physical power; requires --force.
+    PowerOff {
+        #[command(flatten)]
+        common: LifecycleCommon,
+        /// Authorize an immediate physical power cut.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Cut and restore physical power; requires --force.
+    PowerCycle {
+        #[command(flatten)]
+        common: LifecycleCommon,
+        /// Authorize a physical power cycle.
+        #[arg(long)]
+        force: bool,
     },
     /// Show configured status for a device, group, site, or all devices.
     Status {
@@ -67,6 +109,24 @@ pub enum Command {
         #[command(subcommand)]
         command: AliasCommand,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct LifecycleCommon {
+    /// Device, group, site, or `all`.
+    pub target: String,
+    /// Emit the stable JSON representation.
+    #[arg(long, conflicts_with = "quiet")]
+    pub json: bool,
+    /// Suppress output; use the exit code only.
+    #[arg(long, conflicts_with = "json")]
+    pub quiet: bool,
+    /// Confirm a multi-device operation without an interactive prompt.
+    #[arg(long)]
+    pub yes: bool,
+    /// Maximum number of devices processed concurrently.
+    #[arg(long, default_value = "1", value_name = "N")]
+    pub parallel: NonZeroUsize,
 }
 
 #[derive(Debug, Subcommand)]

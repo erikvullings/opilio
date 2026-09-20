@@ -21,7 +21,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0005 Named actions and aliases](TASKS/0005-named-actions-and-aliases.md) | done | 0003, 0004 | Safe named remote actions + one-op aliases |
 | [0006 Shelly power provider](TASKS/0006-shelly-power-provider.md) | done | 0003 | Local Shelly switching + electrical telemetry |
 | [0007 Wake-on-LAN provider](TASKS/0007-wake-on-lan-provider.md) | done | 0003 | WoL power-on support |
-| [0008 Safe lifecycle operations](TASKS/0008-safe-lifecycle-operations.md) | open | 0004, 0006, 0007 | on/off/reboot/power-cycle safety semantics |
+| [0008 Safe lifecycle operations](TASKS/0008-safe-lifecycle-operations.md) | done | 0004, 0006, 0007 | on/off/reboot/power-cycle safety semantics |
 | [0009 System and NVIDIA telemetry](TASKS/0009-system-and-nvidia-telemetry.md) | open | 0004 | CPU/RAM/GPU + DGX Spark UMA-aware telemetry |
 | [0010 Generic service health](TASKS/0010-generic-service-health.md) | open | 0004 | Generic health/status/info incl. LLM model name |
 | [0011 Operation history and logging](TASKS/0011-operation-history-and-logging.md) | open | 0005, 0008 | Rotating JSONL history + bounded failure output |
@@ -31,7 +31,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `7 / 16` tasks done.
+**Overall status:** implementation in progress. `8 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -69,6 +69,12 @@ environment references such as `${env:OPILIO_SHELLY_HOME_PASSWORD}`.
 opilio config path
 opilio config check
 opilio status [device|group|site|all]
+opilio on <device|group|site|all> [--wait] [--yes] [--parallel N]
+opilio off <device|group|site|all> [--yes] [--force] [--parallel N]
+opilio shutdown <device|group|site|all> [--yes] [--parallel N]
+opilio reboot <device|group|site|all> [--yes] [--parallel N]
+opilio power-off <device|group|site|all> --force [--yes] [--parallel N]
+opilio power-cycle <device|group|site|all> --force [--yes] [--parallel N]
 opilio device ls
 opilio group ls
 opilio site ls
@@ -113,11 +119,22 @@ socket address such as `192.168.1.255:9` for a directed broadcast. WoL requests
 startup only: it cannot observe outlet state or cut physical power, and Opilio
 reports those limitations rather than inferring that a machine powered on or off.
 
+Lifecycle operations are sequential by default and continue across independent
+device failures; `--parallel N` sets a bounded override. Collection operations
+show and confirm resolved devices unless `--yes` explicitly confirms them.
+`--yes` never grants force: physical `power-off`/`power-cycle` and graceful
+shutdown bypass require `--force`. Normal `off` sends the configured SSH
+shutdown command, waits for SSH to become unreachable, and only then cuts a
+configured Shelly outlet when `shutdown.cut_power` is enabled. WoL-only devices
+stop after graceful shutdown. `on` returns after the power request unless
+`--wait` is supplied, which waits only for SSH readiness. Human and versioned
+JSON output report truthful per-device transition states and aggregate exits.
+
 `alias run` expands a configured alias exactly once to its fixed operation,
 target, and options. Aliases cannot reference aliases or contain workflow
 steps. Read-only status aliases default to four workers; disruptive aliases
-default to one. Aliases for lifecycle operations become executable when those
-operations are added by their dedicated tasks.
+default to one. Lifecycle aliases use the same confirmation, safety, execution,
+and result path as direct lifecycle commands.
 
 Command exit codes are `0` for success, `1` when all device work fails, `2` for
 configuration or usage errors, and `3` for partial success. Group, site, and

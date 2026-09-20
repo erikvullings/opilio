@@ -1,6 +1,6 @@
 //! Application use cases shared by CLI, TUI, and scheduled invocations.
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 
 use crate::{
     action::{
@@ -8,9 +8,14 @@ use crate::{
         write_human as write_action_human, write_json as write_action_json, write_list_human,
     },
     alias::{AliasError, expand_alias},
-    cli::{ActionCommand, AliasCommand, Cli, Command, ConfigCommand, ListCommand},
+    cli::{ActionCommand, AliasCommand, Cli, Command, ConfigCommand, LifecycleCommon, ListCommand},
     config::{Config, ConfigError, config_path},
     domain::Operation,
+    lifecycle::{
+        LifecycleError, LifecycleExecutor, LifecycleOperation, LifecycleRequest,
+        SystemLifecycleExecutor, execute_lifecycle, plan_lifecycle,
+        write_human as write_lifecycle_human, write_json as write_lifecycle_json,
+    },
     ssh::{InteractiveSsh, OpenSsh, SshError},
     status::{
         ConfiguredStatusSource, ExitStatus, StatusError, StatusRequest, StatusSource,
@@ -35,7 +40,7 @@ pub fn execute_with_status_source(
     output: &mut dyn Write,
     status_source: &dyn StatusSource,
 ) -> Result<ExitStatus, AppError> {
-    execute_with_adapters(cli, output, status_source, None, None)
+    execute_with_adapters(cli, output, status_source, None, None, None, None)
 }
 
 /// Executes a parsed invocation with an injectable interactive OpenSSH boundary.
@@ -44,7 +49,15 @@ pub fn execute_with_ssh(
     output: &mut dyn Write,
     ssh: &dyn InteractiveSsh,
 ) -> Result<ExitStatus, AppError> {
-    execute_with_adapters(cli, output, &ConfiguredStatusSource, Some(ssh), None)
+    execute_with_adapters(
+        cli,
+        output,
+        &ConfiguredStatusSource,
+        Some(ssh),
+        None,
+        None,
+        None,
+    )
 }
 
 /// Executes a parsed invocation with an injectable named-action boundary.
@@ -53,7 +66,33 @@ pub fn execute_with_action_executor(
     output: &mut dyn Write,
     executor: &dyn ActionExecutor,
 ) -> Result<ExitStatus, AppError> {
-    execute_with_adapters(cli, output, &ConfiguredStatusSource, None, Some(executor))
+    execute_with_adapters(
+        cli,
+        output,
+        &ConfiguredStatusSource,
+        None,
+        Some(executor),
+        None,
+        None,
+    )
+}
+
+/// Executes lifecycle commands with fakeable SSH/power/wait and confirmation boundaries.
+pub fn execute_with_lifecycle_executor(
+    cli: Cli,
+    output: &mut dyn Write,
+    executor: &dyn LifecycleExecutor,
+    confirmation: &dyn Confirmation,
+) -> Result<ExitStatus, AppError> {
+    execute_with_adapters(
+        cli,
+        output,
+        &ConfiguredStatusSource,
+        None,
+        None,
+        Some(executor),
+        Some(confirmation),
+    )
 }
 
 fn execute_with_adapters(
@@ -62,6 +101,8 @@ fn execute_with_adapters(
     status_source: &dyn StatusSource,
     ssh: Option<&dyn InteractiveSsh>,
     action_executor: Option<&dyn ActionExecutor>,
+    lifecycle_executor: Option<&dyn LifecycleExecutor>,
+    confirmation: Option<&dyn Confirmation>,
 ) -> Result<ExitStatus, AppError> {
     let Some(command) = cli.command else {
         tui::run().map_err(AppError::Io)?;
@@ -88,6 +129,66 @@ fn execute_with_adapters(
                 ExitStatus::Failed
             })
         }
+        Command::On { common, wait } => execute_lifecycle_command(
+            &Config::load(&path)?,
+            common,
+            LifecycleOperation::On,
+            wait,
+            false,
+            output,
+            lifecycle_executor,
+            confirmation,
+        ),
+        Command::Off { common, force } => execute_lifecycle_command(
+            &Config::load(&path)?,
+            common,
+            LifecycleOperation::Off,
+            false,
+            force,
+            output,
+            lifecycle_executor,
+            confirmation,
+        ),
+        Command::Shutdown { common } => execute_lifecycle_command(
+            &Config::load(&path)?,
+            common,
+            LifecycleOperation::Shutdown,
+            false,
+            false,
+            output,
+            lifecycle_executor,
+            confirmation,
+        ),
+        Command::Reboot { common } => execute_lifecycle_command(
+            &Config::load(&path)?,
+            common,
+            LifecycleOperation::Reboot,
+            false,
+            false,
+            output,
+            lifecycle_executor,
+            confirmation,
+        ),
+        Command::PowerOff { common, force } => execute_lifecycle_command(
+            &Config::load(&path)?,
+            common,
+            LifecycleOperation::PowerOff,
+            false,
+            force,
+            output,
+            lifecycle_executor,
+            confirmation,
+        ),
+        Command::PowerCycle { common, force } => execute_lifecycle_command(
+            &Config::load(&path)?,
+            common,
+            LifecycleOperation::PowerCycle,
+            false,
+            force,
+            output,
+            lifecycle_executor,
+            confirmation,
+        ),
         Command::Status {
             target,
             json,
@@ -192,9 +293,152 @@ fn execute_with_adapters(
                     output,
                     status_source,
                 ),
-                operation => Err(AppError::Alias(AliasError::Unsupported(operation))),
+                operation => {
+                    let lifecycle_operation = lifecycle_operation(operation)?;
+                    execute_lifecycle_values(
+                        &config,
+                        lifecycle_operation,
+                        alias.target,
+                        alias.parallelism,
+                        alias.wait,
+                        alias.force,
+                        false,
+                        json,
+                        quiet,
+                        output,
+                        lifecycle_executor,
+                        confirmation,
+                    )
+                }
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_lifecycle_command(
+    config: &Config,
+    common: LifecycleCommon,
+    operation: LifecycleOperation,
+    wait: bool,
+    force: bool,
+    output: &mut dyn Write,
+    executor: Option<&dyn LifecycleExecutor>,
+    confirmation: Option<&dyn Confirmation>,
+) -> Result<ExitStatus, AppError> {
+    execute_lifecycle_values(
+        config,
+        operation,
+        common.target,
+        common.parallel,
+        wait,
+        force,
+        common.yes,
+        common.json,
+        common.quiet,
+        output,
+        executor,
+        confirmation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_lifecycle_values(
+    config: &Config,
+    operation: LifecycleOperation,
+    target: String,
+    parallelism: std::num::NonZeroUsize,
+    wait: bool,
+    force: bool,
+    confirmed: bool,
+    json: bool,
+    quiet: bool,
+    output: &mut dyn Write,
+    executor: Option<&dyn LifecycleExecutor>,
+    confirmation: Option<&dyn Confirmation>,
+) -> Result<ExitStatus, AppError> {
+    let mut plan = plan_lifecycle(
+        config,
+        LifecycleRequest {
+            operation,
+            target,
+            confirmed,
+            force,
+            wait,
+            parallelism,
+        },
+    )?;
+    if let Some(devices) = plan.confirmation_device_names() {
+        let accepted = if let Some(confirmation) = confirmation {
+            confirmation
+                .confirm(operation, &devices)
+                .map_err(AppError::Confirmation)?
+        } else {
+            StdinConfirmation
+                .confirm(operation, &devices)
+                .map_err(AppError::Confirmation)?
+        };
+        if !accepted {
+            return Err(AppError::ConfirmationDeclined);
+        }
+        plan.confirm();
+    }
+
+    let system_executor;
+    let executor = if let Some(executor) = executor {
+        executor
+    } else {
+        system_executor = SystemLifecycleExecutor::system();
+        &system_executor
+    };
+    let report = execute_lifecycle(config, plan, executor)?;
+    if !quiet {
+        if json {
+            write_lifecycle_json(output, &report)?;
+        } else {
+            write_lifecycle_human(output, &report)?;
+        }
+    }
+    Ok(report.exit_status())
+}
+
+fn lifecycle_operation(operation: Operation) -> Result<LifecycleOperation, AppError> {
+    match operation {
+        Operation::On => Ok(LifecycleOperation::On),
+        Operation::Off => Ok(LifecycleOperation::Off),
+        Operation::Shutdown => Ok(LifecycleOperation::Shutdown),
+        Operation::Reboot => Ok(LifecycleOperation::Reboot),
+        Operation::PowerOff => Ok(LifecycleOperation::PowerOff),
+        Operation::PowerCycle => Ok(LifecycleOperation::PowerCycle),
+        Operation::Status => Err(AppError::Alias(AliasError::Unsupported(Operation::Status))),
+    }
+}
+
+pub trait Confirmation {
+    fn confirm(&self, operation: LifecycleOperation, devices: &[String]) -> Result<bool, String>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StdinConfirmation;
+
+impl Confirmation for StdinConfirmation {
+    fn confirm(&self, operation: LifecycleOperation, devices: &[String]) -> Result<bool, String> {
+        eprintln!(
+            "Confirm {operation} for {} device(s): {}",
+            devices.len(),
+            devices.join(", ")
+        );
+        eprint!("Continue? [y/N] ");
+        io::stderr().flush().map_err(|error| error.to_string())?;
+        let mut answer = String::new();
+        io::stdin()
+            .lock()
+            .read_line(&mut answer)
+            .map_err(|error| error.to_string())?;
+        Ok(matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "y" | "yes"
+        ))
     }
 }
 
@@ -246,6 +490,12 @@ pub enum AppError {
     #[error(transparent)]
     Alias(#[from] AliasError),
     #[error(transparent)]
+    Lifecycle(#[from] LifecycleError),
+    #[error("could not read confirmation: {0}")]
+    Confirmation(String),
+    #[error("operation cancelled")]
+    ConfirmationDeclined,
+    #[error(transparent)]
     Ssh(#[from] SshError),
     #[error("invalid SSH target: {0}")]
     SshTarget(String),
@@ -260,8 +510,9 @@ impl AppError {
             | Self::Status(_)
             | Self::Action(_)
             | Self::Alias(_)
+            | Self::Lifecycle(_)
             | Self::SshTarget(_) => ExitStatus::ConfigOrUsage.code(),
-            Self::Ssh(_) | Self::Io(_) => 1,
+            Self::Ssh(_) | Self::Confirmation(_) | Self::ConfirmationDeclined | Self::Io(_) => 1,
         }
     }
 }
