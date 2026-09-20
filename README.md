@@ -1,0 +1,59 @@
+# Opilio
+
+Opilio is a cross-platform Rust CLI/TUI for managing a small **flock** of remote machines without installing an Opilio agent on them. It combines safe power control (Shelly/WoL), system OpenSSH, named actions, telemetry, generic service/LLM health, native scheduling, structured output, and a LazyDocker-style TUI.
+
+The product decisions from the requirements grill are captured in [`docs/OPILIO_V1_SPEC.md`](docs/OPILIO_V1_SPEC.md). Coding agents should treat that document as the v1 product contract and [`AGENTS.md`](AGENTS.md) as the task workflow.
+
+## Task workflow
+
+Tasks are independent Markdown files under [`TASKS/`](TASKS/). Each task contains enough context, requirements, dependencies, implementation guidance, acceptance criteria, and validation steps for a fresh coding-agent session to pick it up. Tasks should be completed in dependency order, but independent tasks may be worked in parallel.
+
+The task decomposition follows the tracer-bullet principle used by Matt Pocock's `to-tickets` skill: work is split into small demonstrable slices with explicit blocking edges rather than building all infrastructure first and integrating at the end. His current engineering skills describe `to-tickets` as producing tracer-bullet tickets sized for fresh agent sessions, with dependencies declared explicitly.
+
+## Status dashboard
+
+| Task | Status | Depends on | Outcome |
+|---|---|---|---|
+| [0001 Bootstrap Rust application](TASKS/0001-bootstrap-rust-application.md) | done | — | Buildable cross-platform CLI/library skeleton |
+| [0002 Load and validate configuration](TASKS/0002-load-and-validate-configuration.md) | open | 0001 | Strict portable YAML + target model |
+| [0003 Status and structured output](TASKS/0003-status-and-structured-output.md) | open | 0002 | `status`, target resolution, stable JSON/exit codes |
+| [0004 OpenSSH execution layer](TASKS/0004-openssh-execution-layer.md) | open | 0002 | System SSH, commands/exec, multiplexing seam |
+| [0005 Named actions and aliases](TASKS/0005-named-actions-and-aliases.md) | open | 0003, 0004 | Safe named remote actions + one-op aliases |
+| [0006 Shelly power provider](TASKS/0006-shelly-power-provider.md) | open | 0003 | Local Shelly switching + electrical telemetry |
+| [0007 Wake-on-LAN provider](TASKS/0007-wake-on-lan-provider.md) | open | 0003 | WoL power-on support |
+| [0008 Safe lifecycle operations](TASKS/0008-safe-lifecycle-operations.md) | open | 0004, 0006, 0007 | on/off/reboot/power-cycle safety semantics |
+| [0009 System and NVIDIA telemetry](TASKS/0009-system-and-nvidia-telemetry.md) | open | 0004 | CPU/RAM/GPU + DGX Spark UMA-aware telemetry |
+| [0010 Generic service health](TASKS/0010-generic-service-health.md) | open | 0004 | Generic health/status/info incl. LLM model name |
+| [0011 Operation history and logging](TASKS/0011-operation-history-and-logging.md) | open | 0005, 0008 | Rotating JSONL history + bounded failure output |
+| [0012 Build the TUI dashboard](TASKS/0012-build-tui-dashboard.md) | open | 0008, 0009, 0010, 0011 | Keyboard-first live fleet dashboard |
+| [0013 Diagnostics and doctor](TASKS/0013-diagnostics-and-doctor.md) | open | 0006, 0007, 0009, 0010 | Static config check + runtime diagnostics |
+| [0014 Native scheduling adapters](TASKS/0014-native-scheduling-adapters.md) | open | 0005, 0011 | Linux/macOS/Windows schedule ls/add/rm |
+| [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
+| [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
+
+**Overall status:** implementation in progress. `1 / 16` tasks done.
+
+## Suggested milestones
+
+**Milestone 1 — useful CLI:** 0001–0008. At the end, Opilio can load a flock, resolve targets, use SSH, run named actions, and safely control Shelly/WoL devices.
+
+**Milestone 2 — observability and TUI:** 0009–0012. At the end, Opilio can monitor system/GPU/power/service state and expose it through the live TUI.
+
+**Milestone 3 — operational polish:** 0013–0016. Diagnostics, native scheduling, migration between controller computers, and cross-platform release hardening complete v1.
+
+## Key v1 constraints
+
+Opilio ships as one Rust executable for macOS, Linux, and Windows. System OpenSSH is the intentional SSH dependency. There is no Opilio daemon or remote agent. Configuration is portable YAML; secrets are environment-variable references. Sites describe reachability contexts but do not manage VPNs. Aliases are single-operation shortcuts, not workflows. Telemetry history is in-memory; operation history is persistent rotating JSONL.
+
+## Starting work
+
+A coding agent should start with `TASKS/0001-bootstrap-rust-application.md`. Once a task is picked up, change its `Status` to `in-progress` and update this README dashboard. When finished and validated, mark it `done`, record validation evidence in the task, update the dashboard, and select the next unblocked task.
+
+## Development
+
+```sh
+cargo run -- --help
+cargo test --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --check
+```

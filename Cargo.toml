@@ -1,0 +1,9 @@
+[package]
+name = "opilio"
+version = "0.1.0"
+edition = "2024"
+description = "Agentless management for a small flock of machines"
+rust-version = "1.85"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
