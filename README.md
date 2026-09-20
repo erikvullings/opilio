@@ -20,7 +20,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0004 OpenSSH execution layer](TASKS/0004-openssh-execution-layer.md) | done | 0002 | System SSH, commands/exec, multiplexing seam |
 | [0005 Named actions and aliases](TASKS/0005-named-actions-and-aliases.md) | done | 0003, 0004 | Safe named remote actions + one-op aliases |
 | [0006 Shelly power provider](TASKS/0006-shelly-power-provider.md) | done | 0003 | Local Shelly switching + electrical telemetry |
-| [0007 Wake-on-LAN provider](TASKS/0007-wake-on-lan-provider.md) | open | 0003 | WoL power-on support |
+| [0007 Wake-on-LAN provider](TASKS/0007-wake-on-lan-provider.md) | done | 0003 | WoL power-on support |
 | [0008 Safe lifecycle operations](TASKS/0008-safe-lifecycle-operations.md) | open | 0004, 0006, 0007 | on/off/reboot/power-cycle safety semantics |
 | [0009 System and NVIDIA telemetry](TASKS/0009-system-and-nvidia-telemetry.md) | open | 0004 | CPU/RAM/GPU + DGX Spark UMA-aware telemetry |
 | [0010 Generic service health](TASKS/0010-generic-service-health.md) | open | 0004 | Generic health/status/info incl. LLM model name |
@@ -31,7 +31,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `6 / 16` tasks done.
+**Overall status:** implementation in progress. `7 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -106,6 +106,12 @@ handle Gen1 and RPC-generation devices. The shared power API exposes outlet
 on/off/state plus voltage, current, watts, and energy when supported; unavailable
 measurements remain explicitly unknown or unsupported. Optional Basic/Digest
 authentication resolves passwords only from configured environment references.
+
+Wake-on-LAN providers validate a unicast MAC address and send the standard magic
+packet to `255.255.255.255:9` by default. Set `broadcast` to an explicit IPv4
+socket address such as `192.168.1.255:9` for a directed broadcast. WoL requests
+startup only: it cannot observe outlet state or cut physical power, and Opilio
+reports those limitations rather than inferring that a machine powered on or off.
 
 `alias run` expands a configured alias exactly once to its fixed operation,
 target, and options. Aliases cannot reference aliases or contain workflow

@@ -74,6 +74,9 @@ fn gen1_status_maps_outlet_and_available_electrical_telemetry() {
 
     let status = provider_interface.status();
 
+    let capabilities = provider_interface.capabilities();
+    assert!(capabilities.can_request_power_on);
+    assert!(capabilities.can_cut_physical_power);
     assert_eq!(status.availability, PowerAvailability::Reachable);
     assert_eq!(status.outlet, OutletState::On);
     assert_eq!(

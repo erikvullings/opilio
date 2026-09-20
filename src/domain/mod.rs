@@ -1,6 +1,6 @@
 //! Core configuration domain types.
 
-use std::{fmt, str::FromStr, time::Duration};
+use std::{fmt, net::SocketAddrV4, str::FromStr, time::Duration};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -174,6 +174,8 @@ pub enum PowerProvider {
     },
     Wol {
         mac: MacAddress,
+        #[serde(default)]
+        broadcast: Option<SocketAddrV4>,
     },
 }
 
@@ -191,15 +193,36 @@ impl FromStr for MacAddress {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let invalid = || {
+            format!(
+                "invalid Wake-on-LAN MAC address `{value}`: expected six two-digit hexadecimal octets for a unicast interface"
+            )
+        };
+        let separator = value.as_bytes().get(2).copied().ok_or_else(&invalid)?;
+        if !matches!(separator, b':' | b'-') {
+            return Err(invalid());
+        }
         let octets = value
-            .split([':', '-'])
-            .map(|octet| u8::from_str_radix(octet, 16))
+            .split(char::from(separator))
+            .map(|octet| {
+                if octet.len() != 2 {
+                    return Err(());
+                }
+                u8::from_str_radix(octet, 16).map_err(|_| ())
+            })
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| format!("invalid MAC address `{value}`"))?;
-        let bytes: [u8; 6] = octets
-            .try_into()
-            .map_err(|_| format!("invalid MAC address `{value}`"))?;
+            .map_err(|()| invalid())?;
+        let bytes: [u8; 6] = octets.try_into().map_err(|_| invalid())?;
+        if bytes.iter().all(|byte| *byte == 0) || bytes[0] & 1 != 0 {
+            return Err(invalid());
+        }
         Ok(Self(bytes))
+    }
+}
+
+impl MacAddress {
+    pub const fn octets(self) -> [u8; 6] {
+        self.0
     }
 }
 

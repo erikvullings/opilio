@@ -233,22 +233,33 @@ impl Config {
     }
 
     fn validate_power(&self, device_name: &str, device: &Device) -> Result<(), ConfigError> {
-        if let Some(PowerProvider::Shelly { host, auth }) = &device.power {
-            if host.trim().is_empty() {
+        match &device.power {
+            Some(PowerProvider::Shelly { host, auth }) => {
+                if host.trim().is_empty() {
+                    return Err(validation(format!(
+                        "device `{device_name}` has an empty Shelly host"
+                    )));
+                }
+                if let Some(auth) = auth
+                    && auth
+                        .username
+                        .as_ref()
+                        .is_some_and(|username| username.trim().is_empty())
+                {
+                    return Err(validation(format!(
+                        "device `{device_name}` has an empty Shelly auth username"
+                    )));
+                }
+            }
+            Some(PowerProvider::Wol {
+                broadcast: Some(destination),
+                ..
+            }) if destination.port() == 0 => {
                 return Err(validation(format!(
-                    "device `{device_name}` has an empty Shelly host"
+                    "device `{device_name}` has Wake-on-LAN broadcast destination `{destination}` with invalid port 0"
                 )));
             }
-            if let Some(auth) = auth
-                && auth
-                    .username
-                    .as_ref()
-                    .is_some_and(|username| username.trim().is_empty())
-            {
-                return Err(validation(format!(
-                    "device `{device_name}` has an empty Shelly auth username"
-                )));
-            }
+            _ => {}
         }
         if let Some(shutdown) = &device.shutdown
             && shutdown.command.trim().is_empty()

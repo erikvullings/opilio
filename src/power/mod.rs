@@ -26,6 +26,7 @@ pub enum OutletCommand {
 pub enum PowerAvailability {
     Reachable,
     Unreachable,
+    Unknown,
 }
 
 /// An electrical measurement, distinguishing unsupported from temporarily unknown.
@@ -87,8 +88,21 @@ pub enum PowerError {
     Unsupported(String),
 }
 
+/// Operations and observations a power provider can truthfully support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PowerCapabilities {
+    pub can_request_power_on: bool,
+    pub can_cut_physical_power: bool,
+}
+
 /// Shared interface for physical power implementations.
 pub trait PowerProvider: Send + Sync {
+    fn capabilities(&self) -> PowerCapabilities;
+
+    fn request_on(&self) -> Result<(), PowerError> {
+        self.set_outlet(OutletCommand::On).map(|_| ())
+    }
+
     fn status(&self) -> PowerStatus;
 
     fn set_outlet(&self, command: OutletCommand) -> Result<OutletState, PowerError>;

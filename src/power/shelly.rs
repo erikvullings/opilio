@@ -11,8 +11,8 @@ use crate::{
         Device, PowerProvider as ConfiguredPowerProvider, SecretError, SecretValue, ShellyAuth,
     },
     power::{
-        ElectricalTelemetry, Metric, OutletCommand, OutletState, PowerAvailability, PowerError,
-        PowerProvider, PowerStatus,
+        ElectricalTelemetry, Metric, OutletCommand, OutletState, PowerAvailability,
+        PowerCapabilities, PowerError, PowerProvider, PowerStatus,
     },
 };
 
@@ -412,6 +412,13 @@ impl ShellyProvider<ReqwestHttpClient> {
 }
 
 impl<C: HttpClient> PowerProvider for ShellyProvider<C> {
+    fn capabilities(&self) -> PowerCapabilities {
+        PowerCapabilities {
+            can_request_power_on: true,
+            can_cut_physical_power: true,
+        }
+    }
+
     fn status(&self) -> PowerStatus {
         self.read_status().unwrap_or_else(|error| PowerStatus {
             availability: if matches!(error, PowerError::Unreachable(_)) {
