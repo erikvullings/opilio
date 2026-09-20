@@ -9,7 +9,7 @@ use opilio::{
     app,
     cli::Cli,
     domain::Device,
-    status::{ExitStatus, StatusSource, StatusState},
+    status::{ConfiguredStatusSource, ExitStatus, StatusSource, StatusState},
 };
 
 const CONFIG: &str = r#"
@@ -52,7 +52,8 @@ fn human_status_table_is_stable() {
         Cli::try_parse_from(["opilio", "--config", path.to_str().unwrap(), "status"]).unwrap();
     let mut output = Vec::new();
 
-    let status = app::execute(cli, &mut output).unwrap();
+    let status =
+        app::execute_with_status_source(cli, &mut output, &ConfiguredStatusSource).unwrap();
 
     assert_eq!(status, ExitStatus::Success);
     assert_eq!(
@@ -81,7 +82,8 @@ fn json_status_schema_is_stable() {
     .unwrap();
     let mut output = Vec::new();
 
-    let status = app::execute(cli, &mut output).unwrap();
+    let status =
+        app::execute_with_status_source(cli, &mut output, &ConfiguredStatusSource).unwrap();
 
     assert_eq!(status, ExitStatus::Success);
     assert_eq!(
@@ -125,7 +127,12 @@ fn status_command_resolves_device_group_site_and_default_all_targets() {
         arguments.push("--json");
         let mut output = Vec::new();
 
-        app::execute(Cli::try_parse_from(arguments).unwrap(), &mut output).unwrap();
+        app::execute_with_status_source(
+            Cli::try_parse_from(arguments).unwrap(),
+            &mut output,
+            &ConfiguredStatusSource,
+        )
+        .unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
         let devices = json["devices"]
@@ -142,7 +149,7 @@ fn status_command_resolves_device_group_site_and_default_all_targets() {
 fn single_device_uses_human_detail_and_quiet_suppresses_output() {
     let path = config_path();
     let mut detail = Vec::new();
-    app::execute(
+    app::execute_with_status_source(
         Cli::try_parse_from([
             "opilio",
             "--config",
@@ -152,6 +159,7 @@ fn single_device_uses_human_detail_and_quiet_suppresses_output() {
         ])
         .unwrap(),
         &mut detail,
+        &ConfiguredStatusSource,
     )
     .unwrap();
     assert_eq!(
@@ -166,7 +174,7 @@ Detail: -
     );
 
     let mut quiet = Vec::new();
-    let status = app::execute(
+    let status = app::execute_with_status_source(
         Cli::try_parse_from([
             "opilio",
             "--config",
@@ -176,6 +184,7 @@ Detail: -
         ])
         .unwrap(),
         &mut quiet,
+        &ConfiguredStatusSource,
     )
     .unwrap();
     assert_eq!(status, ExitStatus::Success);
@@ -191,6 +200,14 @@ impl StatusSource for BetaFailure {
         } else {
             Ok(StatusState::Configured)
         }
+    }
+}
+
+struct AllOffline;
+
+impl StatusSource for AllOffline {
+    fn status(&self, _device_name: &str, _device: &Device) -> Result<StatusState, String> {
+        Err("SSH reachability probe failed".to_owned())
     }
 }
 
@@ -218,6 +235,25 @@ fn status_command_returns_partial_success_after_rendering_every_device() {
     assert_eq!(json["summary"]["failed"], 1);
     assert_eq!(json["devices"].as_array().unwrap().len(), 2);
     assert_eq!(json["devices"][1]["error"], "not reachable");
+}
+
+#[test]
+fn entirely_offline_status_returns_failure_exit() {
+    let path = config_path();
+    let cli = Cli::try_parse_from([
+        "opilio",
+        "--config",
+        path.to_str().unwrap(),
+        "status",
+        "workers",
+        "--quiet",
+    ])
+    .unwrap();
+
+    let status = app::execute_with_status_source(cli, &mut Vec::new(), &AllOffline).unwrap();
+
+    assert_eq!(status, ExitStatus::Failed);
+    assert_eq!(status.code(), 1);
 }
 
 #[test]

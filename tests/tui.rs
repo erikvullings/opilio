@@ -111,6 +111,37 @@ fn actions_and_help_are_keyboard_driven() {
 }
 
 #[test]
+fn preexecution_failure_clears_and_marks_every_selected_device() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::Key(Key::Left));
+    dashboard.update(Event::Key(Key::Action));
+    assert_eq!(
+        dashboard.update(Event::Key(Key::Enter)),
+        vec![Effect::RunAction {
+            name: "update".into(),
+            target: "all".into(),
+        }]
+    );
+    assert!(dashboard.busy());
+
+    for device in ["alpha", "beta"] {
+        dashboard.update(Event::OperationFinished {
+            device: device.to_owned(),
+            operation: "action update".to_owned(),
+            result: Err("OpenSSH unavailable".to_owned()),
+        });
+    }
+
+    assert!(!dashboard.busy());
+    for device in ["alpha", "beta"] {
+        assert_eq!(
+            dashboard.device(device).unwrap().recent_failure.as_deref(),
+            Some("OpenSSH unavailable")
+        );
+    }
+}
+
+#[test]
 fn telemetry_samples_are_bounded_and_keep_service_and_failure_details() {
     let mut dashboard = Dashboard::from_config(&config());
     for value in 0..80 {

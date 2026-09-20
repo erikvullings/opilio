@@ -62,8 +62,9 @@ exports redact configured resolved values.
 Validate before contacting hardware:
 
 ```sh
-opilio config path
-opilio config check
+opilio config path --json
+opilio config check --quiet
+opilio device ls --json
 ```
 
 `config check` is static and network-free. `doctor` is the separate runtime
@@ -75,9 +76,17 @@ opilio doctor lab --json
 opilio status all
 ```
 
+`config path`, `config check`, and device/group/site `ls` support stable,
+versioned `--json` documents and `--quiet`. `status` first runs a bounded SSH
+reachability probe; unreachable devices fail the command. Telemetry or service
+probe degradation remains visible in nested observations without changing a
+reachable device to failed.
+
 On a fresh controller, `opilio import setup.tar --non-interactive` can install
 the portable flock and isolated SSH entries before these checks. Exit `3`
 means local environment variables or key mappings still need attention.
+Import stages configuration, owned SSH entries, and the user SSH include as
+one transaction; a commit failure restores every prior file.
 
 ## Power and services
 
@@ -188,4 +197,3 @@ the whole bundle before writing and keeps managed SSH entries under
   and `opilio history`.
 - **TUI refuses to start:** use an interactive terminal; scripts should use CLI
   commands and `--json`/`--quiet`.
-

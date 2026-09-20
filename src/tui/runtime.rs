@@ -2,16 +2,21 @@ use std::{
     collections::HashSet,
     io::{self, IsTerminal, Stdout},
     num::NonZeroUsize,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 #[cfg(not(windows))]
 use std::{
+    collections::HashMap,
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
+    sync::Mutex,
 };
 
 use crossterm::{
@@ -39,11 +44,15 @@ use crate::{
         ServiceObservation, ServiceState,
     },
     ssh::{CancellationToken, OpenSsh},
+    target::Target,
     telemetry::{
         Metric, ProviderSnapshot, RemoteTelemetryExecutor, TelemetryCollector, TelemetrySnapshot,
         nvidia::NvidiaMetrics, system::SystemMetrics,
     },
 };
+
+#[cfg(not(windows))]
+use crate::ssh::{ControlMaster, ExecutionOptions, RemoteInvocation};
 
 use super::{
     Dashboard, DashboardSample, DeviceState, Effect, Event, Key, Operation, PollKind, PollPolicy,
@@ -52,6 +61,7 @@ use super::{
 
 const EVENT_TICK: Duration = Duration::from_millis(100);
 const POWER_TIMEOUT: Duration = Duration::from_secs(2);
+const SSH_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum RuntimeMessage {
     Poll(DashboardSample),
@@ -173,6 +183,7 @@ pub fn run(config: Config) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other("the TUI requires an interactive terminal"));
     }
+    let control_masters = Arc::new(ControlMasterPool::system());
     let mut jobs = BackgroundJobs::new();
     let mut terminal = TerminalSession::enter()?;
     let mut dashboard = Dashboard::from_config(&config);
@@ -195,6 +206,7 @@ pub fn run(config: Config) -> io::Result<()> {
                 &policy,
                 &due,
                 &sender,
+                Arc::clone(&control_masters),
                 &mut jobs,
                 &mut polls_in_flight,
             );
@@ -241,12 +253,14 @@ pub fn run(config: Config) -> io::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_due_polls(
     config: &Config,
     dashboard: &Dashboard,
     policy: &PollPolicy,
     due: &[PollKind],
     sender: &Sender<RuntimeMessage>,
+    control_masters: Arc<ControlMasterPool>,
     jobs: &mut BackgroundJobs,
     polls_in_flight: &mut HashSet<String>,
 ) {
@@ -259,8 +273,9 @@ fn spawn_due_polls(
         let name = name.to_owned();
         let due = due.to_vec();
         let sender = sender.clone();
+        let control_masters = Arc::clone(&control_masters);
         jobs.spawn(move |cancellation| {
-            let sample = poll_device(&config, &name, &due, &cancellation);
+            let sample = poll_device(&config, &name, &due, &cancellation, &control_masters);
             let _ = sender.send(RuntimeMessage::Poll(sample));
         });
     }
@@ -271,10 +286,11 @@ fn poll_device(
     name: &str,
     due: &[PollKind],
     cancellation: &CancellationToken,
+    control_masters: &ControlMasterPool,
 ) -> DashboardSample {
     let device = &config.devices()[name];
     let power = poll_power(device);
-    let mut sample = DashboardSample {
+    let sample = DashboardSample {
         device: name.to_owned(),
         state: DeviceState::Unknown,
         ram_percent: None,
@@ -283,15 +299,108 @@ fn poll_device(
         service: None,
         error: power.as_ref().and_then(|(_, _, error)| error.clone()),
     };
-    let ssh = match OpenSsh::system() {
-        Ok(ssh) => ssh,
-        Err(error) => {
-            sample.state = DeviceState::Error;
-            sample.error = Some(error.to_string());
-            return sample;
+    poll_remote(
+        config,
+        name,
+        due,
+        cancellation,
+        power.as_ref(),
+        control_masters,
+        sample,
+    )
+}
+
+#[cfg(not(windows))]
+struct ControlMasterPool {
+    ssh: Result<OpenSsh, String>,
+    masters: Mutex<HashMap<String, Arc<ControlMaster>>>,
+}
+
+#[cfg(not(windows))]
+impl ControlMasterPool {
+    fn system() -> Self {
+        Self::new(OpenSsh::system().map_err(|error| error.to_string()))
+    }
+
+    fn new(ssh: Result<OpenSsh, String>) -> Self {
+        Self {
+            ssh,
+            masters: Mutex::new(HashMap::new()),
         }
-    };
-    poll_remote(config, name, due, cancellation, power.as_ref(), ssh, sample)
+    }
+
+    fn connection(
+        &self,
+        name: &str,
+        target: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Arc<ControlMaster>, String> {
+        let mut masters = self
+            .masters
+            .lock()
+            .map_err(|_| "SSH control-master pool lock poisoned".to_owned())?;
+        if let Some(master) = masters.get(name) {
+            return Ok(Arc::clone(master));
+        }
+        let ssh = self.ssh.as_ref().map_err(Clone::clone)?;
+        let path = control_path(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("could not prepare SSH control directory: {error}"))?;
+        }
+        let master = ssh
+            .start_control_master_with_options(
+                target,
+                &path,
+                ExecutionOptions {
+                    timeout: Some(SSH_STARTUP_TIMEOUT),
+                    cancellation: cancellation.clone(),
+                    ..ExecutionOptions::default()
+                },
+            )
+            .map(Arc::new)
+            .map_err(|error| {
+                let _ = fs::remove_file(path);
+                error.to_string()
+            })?;
+        masters.insert(name.to_owned(), Arc::clone(&master));
+        Ok(master)
+    }
+
+    fn evict(&self, name: &str) {
+        if let Ok(mut masters) = self.masters.lock()
+            && let Some(master) = masters.remove(name)
+        {
+            let _ = master.close();
+            let _ = fs::remove_file(control_path(name));
+        }
+    }
+
+    fn close_all(&self) {
+        if let Ok(mut masters) = self.masters.lock() {
+            for (name, master) in masters.drain() {
+                let _ = master.close();
+                let _ = fs::remove_file(control_path(&name));
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for ControlMasterPool {
+    fn drop(&mut self) {
+        self.close_all();
+    }
+}
+
+#[cfg(windows)]
+struct ControlMasterPool;
+
+#[cfg(windows)]
+impl ControlMasterPool {
+    fn system() -> Self {
+        Self
+    }
 }
 
 #[cfg(not(windows))]
@@ -301,36 +410,45 @@ fn poll_remote(
     due: &[PollKind],
     cancellation: &CancellationToken,
     power: Option<&(OutletState, Option<f64>, Option<String>)>,
-    ssh: OpenSsh,
+    control_masters: &ControlMasterPool,
     mut sample: DashboardSample,
 ) -> DashboardSample {
     let device = &config.devices()[name];
-    let path = control_path(name);
-    if let Some(parent) = path.parent()
-        && let Err(error) = fs::create_dir_all(parent)
-    {
-        sample.state = DeviceState::Error;
-        sample.error = Some(format!("could not prepare SSH control directory: {error}"));
-        return sample;
-    }
-    let master = match ssh.start_control_master(&device.ssh, &path) {
+    let master = match control_masters.connection(name, &device.ssh, cancellation) {
         Ok(master) => master,
         Err(error) => {
-            let _ = fs::remove_file(path);
-            return unreachable_sample(sample, power, error.to_string());
+            return unreachable_sample(sample, power, error);
         }
     };
+    let probe = master.execute(
+        &RemoteInvocation::command(":", &device.shell),
+        ExecutionOptions {
+            timeout: Some(SSH_STARTUP_TIMEOUT),
+            cancellation: cancellation.clone(),
+            ..ExecutionOptions::default()
+        },
+    );
+    let probe_error = match probe {
+        Ok(output) if output.success() => None,
+        Ok(output) => Some(format!(
+            "OpenSSH reachability probe failed (exit {:?})",
+            output.exit_code
+        )),
+        Err(error) => Some(error.to_string()),
+    };
+    if let Some(error) = probe_error {
+        control_masters.evict(name);
+        return unreachable_sample(sample, power, error);
+    }
     collect_remote(
         config,
         name,
         due,
         cancellation,
-        &master,
-        &master,
+        master.as_ref(),
+        master.as_ref(),
         &mut sample,
     );
-    let _ = master.close();
-    let _ = fs::remove_file(path);
     sample
 }
 
@@ -341,7 +459,7 @@ fn poll_remote(
     due: &[PollKind],
     cancellation: &CancellationToken,
     power: Option<&(OutletState, Option<f64>, Option<String>)>,
-    ssh: OpenSsh,
+    _control_masters: &ControlMasterPool,
     mut sample: DashboardSample,
 ) -> DashboardSample {
     use crate::{
@@ -351,6 +469,14 @@ fn poll_remote(
     };
 
     let device = &config.devices()[name];
+    let ssh = match OpenSsh::system() {
+        Ok(ssh) => ssh,
+        Err(error) => {
+            sample.state = DeviceState::Error;
+            sample.error = Some(error.to_string());
+            return sample;
+        }
+    };
     let probe = ssh.execute(
         &device.ssh,
         &RemoteInvocation::command(":", &device.shell),
@@ -517,6 +643,7 @@ fn spawn_operation(
 ) {
     jobs.spawn(move |_| {
         let started = Instant::now();
+        let selected = Target::resolve(&target, &config).unwrap_or_default();
         let lifecycle = match operation {
             Operation::On => LifecycleOperation::On,
             Operation::Off => LifecycleOperation::Off,
@@ -547,11 +674,7 @@ fn spawn_operation(
                 }
             }
             Err(error) => {
-                let _ = sender.send(RuntimeMessage::Operation {
-                    device: "selection".to_owned(),
-                    operation: operation.label().to_owned(),
-                    result: Err(error.to_string()),
-                });
+                send_operation_failures(&sender, &selected, operation.label(), &error.to_string());
             }
         }
     });
@@ -567,6 +690,7 @@ fn spawn_action(
     jobs.spawn(move |_| {
         let started = Instant::now();
         let operation = format!("action {name}");
+        let selected = Target::resolve(&target, &config).unwrap_or_default();
         let result = OpenSsh::system()
             .map_err(|error| error.to_string())
             .and_then(|ssh| {
@@ -594,14 +718,25 @@ fn spawn_action(
                 }
             }
             Err(error) => {
-                let _ = sender.send(RuntimeMessage::Operation {
-                    device: "selection".to_owned(),
-                    operation,
-                    result: Err(error),
-                });
+                send_operation_failures(&sender, &selected, &operation, &error);
             }
         }
     });
+}
+
+fn send_operation_failures(
+    sender: &Sender<RuntimeMessage>,
+    devices: &[String],
+    operation: &str,
+    error: &str,
+) {
+    for device in devices {
+        let _ = sender.send(RuntimeMessage::Operation {
+            device: device.clone(),
+            operation: operation.to_owned(),
+            result: Err(error.to_owned()),
+        });
+    }
 }
 
 fn history_store(config: &Config) -> Option<HistoryStore> {
@@ -790,7 +925,49 @@ fn map_key(code: KeyCode) -> Key {
 
 #[cfg(all(test, not(windows)))]
 mod tests {
-    use super::control_path;
+    use std::{
+        collections::VecDeque,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
+
+    use crate::ssh::{ProcessAdapter, ProcessError, ProcessOutput, ProcessRequest};
+
+    use super::{
+        CancellationToken, Config, ControlMasterPool, DeviceState, OpenSsh, RuntimeMessage,
+        SSH_STARTUP_TIMEOUT, control_path, mpsc, poll_device, send_operation_failures,
+    };
+
+    struct FakeProcess {
+        outputs: Mutex<VecDeque<ProcessOutput>>,
+        requests: Mutex<Vec<ProcessRequest>>,
+    }
+
+    impl ProcessAdapter for FakeProcess {
+        fn find_executable(&self, name: &str) -> Option<PathBuf> {
+            (name == "ssh").then(|| PathBuf::from("/test/ssh"))
+        }
+
+        fn run(&self, request: &ProcessRequest) -> Result<ProcessOutput, ProcessError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(self.outputs.lock().unwrap().pop_front().unwrap())
+        }
+
+        fn interactive(&self, _request: &ProcessRequest) -> Result<i32, ProcessError> {
+            unreachable!()
+        }
+    }
+
+    fn output(exit_code: i32) -> ProcessOutput {
+        ProcessOutput {
+            exit_code: Some(exit_code),
+            ..ProcessOutput::default()
+        }
+    }
+
+    fn config() -> Config {
+        Config::from_yaml("devices:\n  alpha:\n    ssh: alpha\n").unwrap()
+    }
 
     #[test]
     fn control_socket_names_are_short_and_device_specific() {
@@ -799,5 +976,102 @@ mod tests {
 
         assert!(first.file_name().unwrap().len() <= 32);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn control_master_pool_reuses_connections_and_closes_them() {
+        let process = Arc::new(FakeProcess {
+            outputs: Mutex::new([output(0), output(0), output(0), output(0)].into()),
+            requests: Mutex::new(Vec::new()),
+        });
+        let ssh = OpenSsh::discover(process.clone()).unwrap();
+        {
+            let pool = ControlMasterPool::new(Ok(ssh));
+            let cancellation = CancellationToken::new();
+            poll_device(&config(), "alpha", &[], &cancellation, &pool);
+            poll_device(&config(), "alpha", &[], &cancellation, &pool);
+        }
+
+        let requests = process.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request
+                    .arguments()
+                    .iter()
+                    .any(|arg| arg == "ControlMaster=yes"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.arguments().iter().any(|arg| arg == "exit"))
+                .count(),
+            1
+        );
+        assert_eq!(requests[0].timeout(), Some(SSH_STARTUP_TIMEOUT));
+    }
+
+    #[test]
+    fn failed_probe_evicts_the_control_master_before_next_poll() {
+        let process = Arc::new(FakeProcess {
+            outputs: Mutex::new(
+                [
+                    output(0),
+                    output(255),
+                    output(0),
+                    output(0),
+                    output(0),
+                    output(0),
+                ]
+                .into(),
+            ),
+            requests: Mutex::new(Vec::new()),
+        });
+        let pool = ControlMasterPool::new(Ok(OpenSsh::discover(process.clone()).unwrap()));
+        let cancellation = CancellationToken::new();
+
+        let first = poll_device(&config(), "alpha", &[], &cancellation, &pool);
+        let second = poll_device(&config(), "alpha", &[], &cancellation, &pool);
+
+        assert_eq!(first.state, DeviceState::Unreachable);
+        assert_eq!(second.state, DeviceState::Running);
+        assert_eq!(
+            process
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request
+                    .arguments()
+                    .iter()
+                    .any(|arg| arg == "ControlMaster=yes"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn preexecution_failures_are_sent_for_every_resolved_device() {
+        let (sender, receiver) = mpsc::channel();
+        send_operation_failures(
+            &sender,
+            &["alpha".to_owned(), "beta".to_owned()],
+            "action update",
+            "planning failed",
+        );
+
+        let devices = receiver
+            .try_iter()
+            .map(|message| match message {
+                RuntimeMessage::Operation { device, result, .. } => {
+                    assert_eq!(result, Err("planning failed".to_owned()));
+                    device
+                }
+                RuntimeMessage::Poll(_) => panic!("unexpected poll message"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(devices, ["alpha", "beta"]);
     }
 }

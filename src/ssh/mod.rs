@@ -489,6 +489,15 @@ impl OpenSsh {
         target: impl Into<String>,
         control_path: &Path,
     ) -> Result<ControlMaster, SshError> {
+        self.start_control_master_with_options(target, control_path, ExecutionOptions::default())
+    }
+
+    pub fn start_control_master_with_options(
+        &self,
+        target: impl Into<String>,
+        control_path: &Path,
+        options: ExecutionOptions,
+    ) -> Result<ControlMaster, SshError> {
         let target = target.into();
         let control_option = control_path_option(control_path);
         let arguments = [
@@ -502,8 +511,7 @@ impl OpenSsh {
             OsString::from("-f"),
         ]
         .into();
-        let result =
-            self.execute_with_prefix(arguments, &target, None, ExecutionOptions::default())?;
+        let result = self.execute_with_prefix(arguments, &target, None, options)?;
         ensure_success(&result)?;
         Ok(ControlMaster {
             ssh: self.clone(),

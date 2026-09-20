@@ -213,8 +213,18 @@ pub mod platform {
 #[derive(Debug, Serialize, Deserialize)]
 struct OwnedRecord {
     owner: String,
+    #[serde(default)]
+    installation: InstallationState,
     job: ScheduleEntry,
     artifacts: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum InstallationState {
+    Installing,
+    #[default]
+    Active,
 }
 
 pub struct NativeScheduler {
@@ -222,6 +232,9 @@ pub struct NativeScheduler {
     registry: PathBuf,
     native_root: PathBuf,
     uid: Option<u32>,
+    command_runner: fn(&[NativeCommand]) -> Result<(), ScheduleError>,
+    #[cfg(test)]
+    fail_active_record: bool,
 }
 
 impl NativeScheduler {
@@ -244,6 +257,9 @@ impl NativeScheduler {
                 registry,
                 native_root: base.home_dir().join(".config/systemd/user"),
                 uid: None,
+                command_runner: run_commands,
+                #[cfg(test)]
+                fail_active_record: false,
             });
         }
         #[cfg(target_os = "macos")]
@@ -263,6 +279,9 @@ impl NativeScheduler {
                 registry,
                 native_root: base.home_dir().join("Library/LaunchAgents"),
                 uid: Some(uid),
+                command_runner: run_commands,
+                #[cfg(test)]
+                fail_active_record: false,
             });
         }
         #[cfg(target_os = "windows")]
@@ -272,6 +291,9 @@ impl NativeScheduler {
                 native_root: registry.clone(),
                 registry,
                 uid: None,
+                command_runner: run_commands,
+                #[cfg(test)]
+                fail_active_record: false,
             });
         }
         #[allow(unreachable_code)]
@@ -335,6 +357,42 @@ impl NativeScheduler {
             },
         }
     }
+
+    fn write_record(&self, id: &ScheduleId, record: &OwnedRecord) -> Result<(), ScheduleError> {
+        #[cfg(test)]
+        if self.fail_active_record && record.installation == InstallationState::Active {
+            return Err(ScheduleError::Io(io::Error::other(
+                "injected active metadata failure",
+            )));
+        }
+        atomic_write(&self.record_path(id), &serde_json::to_vec_pretty(record)?)
+    }
+
+    fn rollback_install(
+        &self,
+        request: &AddSchedule,
+        plan: &PlatformPlan,
+        previous_crontab: Option<&str>,
+    ) {
+        let deactivated = if let Some(previous) = previous_crontab {
+            write_crontab(previous).is_ok()
+        } else {
+            let removed = (self.command_runner)(&plan.remove).is_ok();
+            for artifact in &plan.artifacts {
+                let _ = fs::remove_file(&artifact.path);
+            }
+            if self.backend == Backend::Systemd {
+                let _ = (self.command_runner)(&[NativeCommand {
+                    program: "systemctl".into(),
+                    args: vec!["--user".into(), "daemon-reload".into()],
+                }]);
+            }
+            removed
+        };
+        if deactivated {
+            let _ = fs::remove_file(self.record_path(&request.id));
+        }
+    }
 }
 
 impl Scheduler for NativeScheduler {
@@ -352,6 +410,11 @@ impl Scheduler for NativeScheduler {
             {
                 Ok(record) if record.owner == OWNERSHIP_MARKER => {
                     let id = &record.job.id;
+                    if record.installation == InstallationState::Installing {
+                        warnings.push(format!(
+                            "owned schedule {id} has an incomplete installation"
+                        ));
+                    }
                     if record.job.backend == Backend::Cron {
                         match current_crontab() {
                             Ok(contents)
@@ -402,30 +465,10 @@ impl Scheduler for NativeScheduler {
         }
         fs::create_dir_all(&self.registry)?;
         let plan = self.plan(&request, self.backend);
-        if self.backend == Backend::Cron {
-            install_cron(&request)?;
-        } else {
-            for artifact in &plan.artifacts {
-                if artifact.path.exists() {
-                    return Err(ScheduleError::AlreadyExists(request.id.to_string()));
-                }
-                if let Some(parent) = artifact.path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&artifact.path, &artifact.contents)?;
-            }
-            if let Err(error) = run_commands(&plan.install) {
-                for artifact in &plan.artifacts {
-                    let _ = fs::remove_file(&artifact.path);
-                }
-                if self.backend == Backend::Systemd {
-                    let _ = run_commands(&[NativeCommand {
-                        program: "systemctl".into(),
-                        args: vec!["--user".into(), "daemon-reload".into()],
-                    }]);
-                }
-                return Err(error);
-            }
+        if self.backend != Backend::Cron
+            && plan.artifacts.iter().any(|artifact| artifact.path.exists())
+        {
+            return Err(ScheduleError::AlreadyExists(request.id.to_string()));
         }
         let job = ScheduleEntry {
             id: request.id.to_string(),
@@ -433,8 +476,9 @@ impl Scheduler for NativeScheduler {
             command: request.command.args().to_vec(),
             backend: self.backend,
         };
-        let record = OwnedRecord {
+        let mut record = OwnedRecord {
             owner: OWNERSHIP_MARKER.to_owned(),
+            installation: InstallationState::Installing,
             job: job.clone(),
             artifacts: plan
                 .artifacts
@@ -442,10 +486,52 @@ impl Scheduler for NativeScheduler {
                 .map(|artifact| artifact.path.clone())
                 .collect(),
         };
-        fs::write(
-            self.record_path(&request.id),
-            serde_json::to_vec_pretty(&record)?,
-        )?;
+        self.write_record(&request.id, &record)?;
+        let previous_crontab = if self.backend == Backend::Cron {
+            match current_crontab() {
+                Ok(contents) => Some(contents),
+                Err(error) => {
+                    let _ = fs::remove_file(self.record_path(&request.id));
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        if self.backend == Backend::Cron {
+            if let Err(error) = install_cron(&request) {
+                self.rollback_install(&request, &plan, previous_crontab.as_deref());
+                return Err(error);
+            }
+        } else {
+            for artifact in &plan.artifacts {
+                if let Some(parent) = artifact.path.parent() {
+                    if let Err(error) = fs::create_dir_all(parent) {
+                        for artifact in &plan.artifacts {
+                            let _ = fs::remove_file(&artifact.path);
+                        }
+                        let _ = fs::remove_file(self.record_path(&request.id));
+                        return Err(error.into());
+                    }
+                }
+                if let Err(error) = fs::write(&artifact.path, &artifact.contents) {
+                    for artifact in &plan.artifacts {
+                        let _ = fs::remove_file(&artifact.path);
+                    }
+                    let _ = fs::remove_file(self.record_path(&request.id));
+                    return Err(error.into());
+                }
+            }
+            if let Err(error) = (self.command_runner)(&plan.install) {
+                self.rollback_install(&request, &plan, None);
+                return Err(error);
+            }
+        }
+        record.installation = InstallationState::Active;
+        if let Err(error) = self.write_record(&request.id, &record) {
+            self.rollback_install(&request, &plan, previous_crontab.as_deref());
+            return Err(error);
+        }
         Ok(job)
     }
 
@@ -502,7 +588,7 @@ impl Scheduler for NativeScheduler {
             };
             let plan = self.plan(&request, record.job.backend);
             if let Some(first) = plan.remove.first() {
-                run_commands(std::slice::from_ref(first))?;
+                (self.command_runner)(std::slice::from_ref(first))?;
             }
             for (artifact, _) in &artifacts {
                 if let Err(error) = fs::remove_file(artifact) {
@@ -511,7 +597,7 @@ impl Scheduler for NativeScheduler {
                 }
             }
             if plan.remove.len() > 1 {
-                if let Err(error) = run_commands(&plan.remove[1..]) {
+                if let Err(error) = (self.command_runner)(&plan.remove[1..]) {
                     restore_artifacts(&artifacts);
                     return Err(error);
                 }
@@ -619,6 +705,35 @@ fn restore_artifacts(artifacts: &[(PathBuf, String)]) {
     }
 }
 
+fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<(), ScheduleError> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    fs::create_dir_all(parent)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ScheduleError::InvalidPath("schedule metadata".to_owned()))?;
+    let temporary = parent.join(format!(".{name}.opilio-new-{}", std::process::id()));
+    let result = (|| {
+        use std::io::Write;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result.map_err(ScheduleError::Io)
+}
+
 const fn backend_supported(backend: Backend) -> bool {
     match backend {
         Backend::Systemd | Backend::Cron => cfg!(target_os = "linux"),
@@ -714,11 +829,21 @@ pub enum ScheduleError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use super::*;
 
     static NEXT_CASE: AtomicUsize = AtomicUsize::new(0);
+    static COMMANDS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn successful_commands(commands: &[NativeCommand]) -> Result<(), ScheduleError> {
+        COMMANDS.fetch_add(commands.len(), Ordering::SeqCst);
+        Ok(())
+    }
 
     #[test]
     fn registry_ignores_foreign_metadata_and_refuses_its_removal() {
@@ -740,6 +865,8 @@ mod tests {
             native_root: registry.clone(),
             registry,
             uid: Some(501),
+            command_runner: run_commands,
+            fail_active_record: false,
         };
 
         assert!(scheduler.list().unwrap().jobs.is_empty());
@@ -747,5 +874,53 @@ mod tests {
             scheduler.remove(&ScheduleId::new("foreign").unwrap()),
             Err(ScheduleError::NotOwned(id)) if id == "foreign"
         ));
+    }
+
+    #[test]
+    fn activation_is_rolled_back_when_active_metadata_commit_fails() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        COMMANDS.store(0, Ordering::SeqCst);
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/opilio-scheduler-unit")
+            .join(format!(
+                "{}-rollback-{}",
+                std::process::id(),
+                NEXT_CASE.fetch_add(1, Ordering::Relaxed)
+            ));
+        let registry = root.join("registry");
+        let native_root = root.join("native");
+        fs::create_dir_all(&registry).unwrap();
+        let scheduler = NativeScheduler {
+            backend: Backend::Launchd,
+            registry: registry.clone(),
+            native_root: native_root.clone(),
+            uid: Some(501),
+            command_runner: successful_commands,
+            fail_active_record: true,
+        };
+        let id = ScheduleId::new("rollback").unwrap();
+
+        let error = scheduler
+            .add(AddSchedule {
+                id: id.clone(),
+                at: "07:30".parse().unwrap(),
+                command: ScheduleCommand::new(vec!["status".into(), "all".into()]).unwrap(),
+                executable: PathBuf::from("/opt/opilio"),
+                config: PathBuf::from("/config.yaml"),
+            })
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected active metadata failure")
+        );
+        assert!(!scheduler.record_path(&id).exists());
+        assert!(
+            !native_root
+                .join("io.github.opilio.schedule.rollback.plist")
+                .exists()
+        );
+        assert_eq!(COMMANDS.load(Ordering::SeqCst), 2);
     }
 }

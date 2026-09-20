@@ -1,25 +1,48 @@
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
+    path::PathBuf,
     sync::{
-        Barrier,
+        Arc, Barrier, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use opilio::{
     config::Config,
     domain::Device,
     service::{ProbeObservation, ServiceObservation, ServiceState},
+    ssh::{OpenSsh, ProcessAdapter, ProcessError, ProcessOutput, ProcessRequest},
     status::{
-        ConcurrentExecutor, ConfiguredStatusSource, ExitStatus, StatusRequest, StatusSource,
-        StatusState, collect_status, write_human,
+        ConcurrentExecutor, ConfiguredStatusSource, ExitStatus, RuntimeStatusSource, StatusRequest,
+        StatusSource, StatusState, collect_status, write_human,
     },
     telemetry::{
         Metric, ProviderSnapshot, TelemetrySnapshot,
         system::{LoadAverage, SystemMemory, SystemMetrics},
     },
 };
+
+struct ProbeProcess {
+    output: ProcessOutput,
+    requests: Mutex<Vec<ProcessRequest>>,
+}
+
+impl ProcessAdapter for ProbeProcess {
+    fn find_executable(&self, name: &str) -> Option<PathBuf> {
+        (name == "ssh").then(|| PathBuf::from("/test/ssh"))
+    }
+
+    fn run(&self, request: &ProcessRequest) -> Result<ProcessOutput, ProcessError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(self.output.clone())
+    }
+
+    fn interactive(&self, _request: &ProcessRequest) -> Result<i32, ProcessError> {
+        unreachable!()
+    }
+}
 
 const CONFIG: &str = r#"
 sites:
@@ -146,6 +169,42 @@ fn exit_status_codes_cover_success_failure_usage_and_partial_success() {
     assert_eq!(ExitStatus::PartialSuccess.code(), 3);
 }
 
+#[test]
+fn runtime_status_uses_a_bounded_ssh_probe_and_offline_is_a_failure() {
+    let process = Arc::new(ProbeProcess {
+        output: ProcessOutput {
+            exit_code: Some(255),
+            stderr: b"connection refused".to_vec(),
+            ..ProcessOutput::default()
+        },
+        requests: Mutex::new(Vec::new()),
+    });
+    let source = RuntimeStatusSource::new(OpenSsh::discover(process.clone()).unwrap());
+    let config = Config::from_yaml(CONFIG).unwrap();
+
+    let report = collect_status(
+        &config,
+        StatusRequest {
+            target: "alpha".to_owned(),
+            ..StatusRequest::default()
+        },
+        &source,
+    )
+    .unwrap();
+
+    assert_eq!(report.exit_status(), ExitStatus::Failed);
+    assert_eq!(report.devices[0].status, StatusState::Failed);
+    assert!(
+        report.devices[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("connection refused")
+    );
+    let requests = process.requests.lock().unwrap();
+    assert_eq!(requests[0].timeout(), Some(Duration::from_secs(5)));
+}
+
 struct TelemetryFixture;
 
 impl StatusSource for TelemetryFixture {
@@ -198,6 +257,69 @@ fn configured_telemetry_is_exposed_without_changing_schema_for_other_devices() {
         serde_json::json!({"state": "available", "value": 12.5})
     );
     assert!(json["devices"][1].get("telemetry").is_none());
+}
+
+struct DegradedOptionalProviders;
+
+impl StatusSource for DegradedOptionalProviders {
+    fn status(&self, _device_name: &str, _device: &Device) -> Result<StatusState, String> {
+        Ok(StatusState::Configured)
+    }
+
+    fn telemetry(&self, _device_name: &str, _device: &Device) -> Option<TelemetrySnapshot> {
+        Some(TelemetrySnapshot {
+            collected_at_unix_ms: 1,
+            system: ProviderSnapshot::Unavailable {
+                error: "telemetry unavailable".to_owned(),
+            },
+            nvidia: None,
+        })
+    }
+
+    fn services(
+        &self,
+        _device_name: &str,
+        _device: &Device,
+        _config: &Config,
+    ) -> Option<Vec<ServiceObservation>> {
+        Some(vec![ServiceObservation {
+            name: "llm".to_owned(),
+            state: ServiceState::Error,
+            status: None,
+            health: Some(ProbeObservation {
+                state: ServiceState::Error,
+                http_status: None,
+                error: Some("service unavailable".to_owned()),
+            }),
+            info: None,
+            fields: BTreeMap::new(),
+        }])
+    }
+}
+
+#[test]
+fn reachable_device_keeps_success_when_optional_observability_is_degraded() {
+    let config = Config::from_yaml(CONFIG).unwrap();
+    let report = collect_status(
+        &config,
+        StatusRequest {
+            target: "alpha".to_owned(),
+            ..StatusRequest::default()
+        },
+        &DegradedOptionalProviders,
+    )
+    .unwrap();
+
+    assert_eq!(report.exit_status(), ExitStatus::Success);
+    assert_eq!(report.devices[0].status, StatusState::Configured);
+    assert!(matches!(
+        report.devices[0].telemetry.as_ref().unwrap().system,
+        ProviderSnapshot::Unavailable { .. }
+    ));
+    assert_eq!(
+        report.devices[0].services.as_ref().unwrap()[0].state,
+        ServiceState::Error
+    );
 }
 
 struct ServiceFixture;

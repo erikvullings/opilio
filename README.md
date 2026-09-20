@@ -71,8 +71,8 @@ Start from [`examples/config.yaml`](examples/config.yaml); secrets must remain
 environment references such as `${env:OPILIO_SHELLY_HOME_PASSWORD}`.
 
 ```sh
-opilio config path
-opilio config check
+opilio config path [--json|--quiet]
+opilio config check [--json|--quiet]
 opilio doctor [device|group|site|all] [--json] [--quiet]
 opilio status [device|group|site|all]
 opilio on <device|group|site|all> [--wait] [--yes] [--parallel N]
@@ -81,9 +81,9 @@ opilio shutdown <device|group|site|all> [--yes] [--parallel N]
 opilio reboot <device|group|site|all> [--yes] [--parallel N]
 opilio power-off <device|group|site|all> --force [--yes] [--parallel N]
 opilio power-cycle <device|group|site|all> --force [--yes] [--parallel N]
-opilio device ls
-opilio group ls
-opilio site ls
+opilio device ls [--json|--quiet]
+opilio group ls [--json|--quiet]
+opilio site ls [--json|--quiet]
 opilio action ls
 opilio action run <name> <device|group|site|all> [--parallel N]
 opilio alias run <name>
@@ -137,13 +137,17 @@ from the user's OpenSSH configuration. Groups and sites are rejected. A device
 may set `shell` for remote command actions; it defaults to `/bin/sh`, invoked
 explicitly with `-lc`.
 
-`status` defaults to all devices and currently reports the reachability-neutral
-`configured` state. Devices with `telemetry.provider: system` or `nvidia` also
-collect Linux CPU/load, RAM, and uptime over OpenSSH; the NVIDIA provider
-discovers supported `nvidia-smi` fields and adds GPU utilization, temperature,
-power, and memory semantics. DGX Spark/GB10 reports `unified` memory and marks
-conventional GPU-memory totals/usage unsupported rather than presenting them as
-VRAM. Unavailable and unsupported providers/metrics remain explicit in JSON.
+`status` defaults to all devices and performs a five-second bounded SSH
+reachability probe. Unreachable devices report `failed` and produce a nonzero
+aggregate exit. A reachable device remains successful when optional telemetry
+or service collection is degraded; those failures stay explicit in the nested
+provider/service observations. Devices with `telemetry.provider: system` or
+`nvidia` also collect Linux CPU/load, RAM, and uptime over OpenSSH; the NVIDIA
+provider discovers supported `nvidia-smi` fields and adds GPU utilization,
+temperature, power, and memory semantics. DGX Spark/GB10 reports `unified`
+memory and marks conventional GPU-memory totals/usage unsupported rather than
+presenting them as VRAM. Unavailable and unsupported providers/metrics remain
+explicit in JSON.
 TUI callers can reuse the same provider API with an OpenSSH ControlMaster and
 bounded in-memory time-series buffers. Use `--json` for the stable versioned
 result document, `--quiet` to rely on the exit code alone, and `--parallel N` to

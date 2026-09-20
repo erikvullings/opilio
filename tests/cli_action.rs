@@ -13,7 +13,7 @@ use opilio::{
     app,
     cli::Cli,
     ssh::{ExecutionOptions, ProcessOutput, RemoteInvocation},
-    status::ExitStatus,
+    status::{ConfiguredStatusSource, ExitStatus},
 };
 
 const CONFIG: &str = r#"
@@ -242,7 +242,7 @@ fn action_run_has_concise_human_output_and_quiet_mode() {
 fn alias_expands_once_to_status_with_its_fixed_target_and_options() {
     let path = config_path();
     let mut output = Vec::new();
-    let status = app::execute(
+    let status = app::execute_with_status_source(
         Cli::try_parse_from([
             "opilio",
             "--config",
@@ -254,6 +254,7 @@ fn alias_expands_once_to_status_with_its_fixed_target_and_options() {
         ])
         .unwrap(),
         &mut output,
+        &ConfiguredStatusSource,
     )
     .unwrap();
 

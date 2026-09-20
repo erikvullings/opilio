@@ -2,8 +2,11 @@
 
 use std::{
     io::{self, BufRead, Write},
+    path::PathBuf,
     time::Instant,
 };
+
+use serde::Serialize;
 
 use crate::{
     action::{
@@ -52,6 +55,9 @@ use crate::{
 /// Runs an Opilio invocation.
 pub fn run(cli: Cli) -> Result<ExitStatus, AppError> {
     let source = cli.source;
+    if !cli.command.as_ref().is_some_and(command_uses_history) {
+        return execute(cli, &mut io::stdout().lock());
+    }
     let redactor = config_path(cli.config.clone())
         .ok()
         .and_then(|path| Config::load(&path).ok())
@@ -62,13 +68,54 @@ pub fn run(cli: Cli) -> Result<ExitStatus, AppError> {
     execute_with_history(cli, &mut io::stdout().lock(), source, &history)
 }
 
+fn command_uses_history(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Ssh { .. }
+            | Command::On { .. }
+            | Command::Off { .. }
+            | Command::Shutdown { .. }
+            | Command::Reboot { .. }
+            | Command::PowerOff { .. }
+            | Command::PowerCycle { .. }
+            | Command::Status { .. }
+            | Command::Action {
+                command: ActionCommand::Run { .. }
+            }
+            | Command::Alias {
+                command: AliasCommand::Run { .. }
+            }
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConfigPathReport {
+    pub schema_version: u8,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConfigCheckReport {
+    pub schema_version: u8,
+    pub path: PathBuf,
+    pub valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NameListing {
+    pub schema_version: u8,
+    pub kind: &'static str,
+    pub names: Vec<String>,
+}
+
 /// Executes a parsed CLI invocation against shared application APIs.
 pub fn execute(cli: Cli, output: &mut dyn Write) -> Result<ExitStatus, AppError> {
     let doctor = SystemDoctorProbe;
+    let status = RuntimeStatusSource::default();
     execute_with_adapters(
         cli,
         output,
-        &RuntimeStatusSource,
+        &status,
         Some(&doctor),
         None,
         None,
@@ -87,10 +134,11 @@ pub fn execute_with_history(
     history: &HistoryStore,
 ) -> Result<ExitStatus, AppError> {
     let doctor = SystemDoctorProbe;
+    let status = RuntimeStatusSource::default();
     execute_with_adapters(
         cli,
         output,
-        &RuntimeStatusSource,
+        &status,
         Some(&doctor),
         None,
         None,
@@ -494,34 +542,77 @@ fn execute_with_adapters(
             Ok(report.exit_status())
         }
         Command::Config {
-            command: ConfigCommand::Path,
+            command: ConfigCommand::Path { json, quiet },
         } => {
-            writeln!(output, "{}", path.display())?;
+            if !quiet {
+                if json {
+                    write_public_json(
+                        output,
+                        &ConfigPathReport {
+                            schema_version: 1,
+                            path,
+                        },
+                    )?;
+                } else {
+                    writeln!(output, "{}", path.display())?;
+                }
+            }
             Ok(ExitStatus::Success)
         }
         Command::Config {
-            command: ConfigCommand::Check,
+            command: ConfigCommand::Check { json, quiet },
         } => {
             Config::load(&path)?;
-            writeln!(output, "configuration is valid: {}", path.display())?;
+            if !quiet {
+                if json {
+                    write_public_json(
+                        output,
+                        &ConfigCheckReport {
+                            schema_version: 1,
+                            path,
+                            valid: true,
+                        },
+                    )?;
+                } else {
+                    writeln!(output, "configuration is valid: {}", path.display())?;
+                }
+            }
             Ok(ExitStatus::Success)
         }
         Command::Device {
-            command: ListCommand::List,
+            command: ListCommand::List { json, quiet },
         } => {
-            write_names(output, Config::load(&path)?.devices().keys())?;
+            write_name_listing(
+                output,
+                "device",
+                Config::load(&path)?.devices().keys(),
+                json,
+                quiet,
+            )?;
             Ok(ExitStatus::Success)
         }
         Command::Group {
-            command: ListCommand::List,
+            command: ListCommand::List { json, quiet },
         } => {
-            write_names(output, Config::load(&path)?.groups().keys())?;
+            write_name_listing(
+                output,
+                "group",
+                Config::load(&path)?.groups().keys(),
+                json,
+                quiet,
+            )?;
             Ok(ExitStatus::Success)
         }
         Command::Site {
-            command: ListCommand::List,
+            command: ListCommand::List { json, quiet },
         } => {
-            write_names(output, Config::load(&path)?.sites().keys())?;
+            write_name_listing(
+                output,
+                "site",
+                Config::load(&path)?.sites().keys(),
+                json,
+                quiet,
+            )?;
             Ok(ExitStatus::Success)
         }
         Command::Action {
@@ -1105,14 +1196,37 @@ fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn write_names<'a>(
+fn write_name_listing<'a>(
     output: &mut dyn Write,
+    kind: &'static str,
     names: impl IntoIterator<Item = &'a String>,
+    json: bool,
+    quiet: bool,
 ) -> Result<(), AppError> {
-    for name in names {
-        writeln!(output, "{name}")?;
+    let names = names.into_iter().cloned().collect::<Vec<_>>();
+    if quiet {
+        return Ok(());
+    }
+    if json {
+        write_public_json(
+            output,
+            &NameListing {
+                schema_version: 1,
+                kind,
+                names,
+            },
+        )?;
+    } else {
+        for name in names {
+            writeln!(output, "{name}")?;
+        }
     }
     Ok(())
+}
+
+fn write_public_json(output: &mut dyn Write, value: &impl Serialize) -> io::Result<()> {
+    serde_json::to_writer_pretty(&mut *output, value)?;
+    writeln!(output)
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -19,12 +19,13 @@ use crate::{
         CommandResponse, EnvironmentSecretResolver, HttpServiceClient, RemoteServiceExecutor,
         ReqwestHttpClient, ServiceCollector, ServiceObservation, SshServiceExecutor,
     },
-    ssh::CancellationToken,
+    ssh::{CancellationToken, ExecutionOptions, OpenSsh, RemoteInvocation},
     target::TargetError,
     telemetry::{SshTelemetryExecutor, TelemetryCollector, TelemetrySnapshot},
 };
 
 const DEFAULT_STATUS_PARALLELISM: usize = 4;
+const SSH_REACHABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusRequest {
@@ -68,11 +69,26 @@ impl StatusSource for ConfiguredStatusSource {
 }
 
 #[derive(Debug, Default)]
-pub struct RuntimeStatusSource;
+pub struct RuntimeStatusSource {
+    ssh: Option<OpenSsh>,
+}
+
+impl RuntimeStatusSource {
+    pub fn new(ssh: OpenSsh) -> Self {
+        Self { ssh: Some(ssh) }
+    }
+}
 
 impl StatusSource for RuntimeStatusSource {
-    fn status(&self, _device_name: &str, _device: &Device) -> Result<StatusState, String> {
-        Ok(StatusState::Configured)
+    fn status(&self, _device_name: &str, device: &Device) -> Result<StatusState, String> {
+        let system;
+        let ssh = if let Some(ssh) = &self.ssh {
+            ssh
+        } else {
+            system = OpenSsh::system().map_err(|error| error.to_string())?;
+            &system
+        };
+        runtime_status(ssh, device)
     }
 
     fn telemetry(&self, _device_name: &str, device: &Device) -> Option<TelemetrySnapshot> {
@@ -124,6 +140,30 @@ impl StatusSource for RuntimeStatusSource {
                 })
                 .collect(),
         )
+    }
+}
+
+fn runtime_status(ssh: &OpenSsh, device: &Device) -> Result<StatusState, String> {
+    let result = ssh
+        .execute(
+            &device.ssh,
+            &RemoteInvocation::command(":", &device.shell),
+            ExecutionOptions {
+                timeout: Some(SSH_REACHABILITY_TIMEOUT),
+                ..ExecutionOptions::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    if result.success() {
+        Ok(StatusState::Configured)
+    } else {
+        Err(format!(
+            "SSH reachability probe failed (exit {:?}, timed_out={}, cancelled={}): {}",
+            result.exit_code,
+            result.timed_out,
+            result.cancelled,
+            String::from_utf8_lossy(&result.stderr).trim()
+        ))
     }
 }
 

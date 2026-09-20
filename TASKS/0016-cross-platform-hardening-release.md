@@ -94,3 +94,9 @@ None currently.
   four platform archives and checksums. Focused tests, full suite, check,
   formatting, strict Clippy, native release build, workflow parsing, and local
   archive checksum verification passed. No known v1 task-scope gaps.
+- 2026-09-20 Copilot: Closed all seven post-review findings: bounded runtime
+  SSH status, transactional scheduler ownership and imports, lifetime TUI SSH
+  pooling with bounded startup/eviction/shutdown, complete TUI failure
+  fan-out, lazy history initialization, and versioned JSON/quiet read
+  commands. Added failure-injection and public-interface regression coverage;
+  task remains `done`.

@@ -321,13 +321,15 @@ pub fn import_bundle(
     validate_mappings(&mappings)?;
     let rendered_ssh = apply_mappings(ssh_text, &manifest.ssh, &mappings)?;
 
-    // Both artifacts are fully parsed and statically validated before the first write.
-    atomic_write(&request.config_path, flock_yaml.as_bytes())?;
-    atomic_write(&request.owned_ssh_config_path, rendered_ssh.as_bytes())?;
-    install_include(
+    let user_ssh_config = render_include(
         &request.user_ssh_config_path,
         &request.owned_ssh_config_path,
     )?;
+    transactional_write(&[
+        (&request.config_path, flock_yaml.as_bytes()),
+        (&request.owned_ssh_config_path, rendered_ssh.as_bytes()),
+        (&request.user_ssh_config_path, &user_ssh_config),
+    ])?;
 
     // Re-load the actual destination before any runtime work.
     let installed = Config::load(&request.config_path)?;
@@ -795,7 +797,7 @@ fn apply_mappings(
     ))
 }
 
-fn install_include(user_config: &Path, owned_config: &Path) -> Result<(), TransferError> {
+fn render_include(user_config: &Path, owned_config: &Path) -> Result<Vec<u8>, TransferError> {
     let parent = user_config.parent().ok_or_else(|| {
         TransferError::Bundle("user SSH config has no parent directory".to_owned())
     })?;
@@ -822,14 +824,128 @@ fn install_include(user_config: &Path, owned_config: &Path) -> Result<(), Transf
         String::new()
     };
     if existing.lines().any(|line| line.trim() == directive) {
-        return Ok(());
+        return Ok(existing.into_bytes());
     }
     let mut updated = format!("{directive}\n");
     updated.push_str(&existing);
     if !updated.ends_with('\n') {
         updated.push('\n');
     }
-    atomic_write(user_config, updated.as_bytes())
+    Ok(updated.into_bytes())
+}
+
+fn transactional_write(outputs: &[(&PathBuf, &[u8])]) -> Result<(), TransferError> {
+    transactional_write_inner(outputs, None)
+}
+
+fn transactional_write_inner(
+    outputs: &[(&PathBuf, &[u8])],
+    fail_before_commit: Option<usize>,
+) -> Result<(), TransferError> {
+    struct Staged {
+        destination: PathBuf,
+        temporary: PathBuf,
+        original: Option<Vec<u8>>,
+    }
+
+    let mut staged: Vec<Staged> = Vec::with_capacity(outputs.len());
+    for (index, (destination, contents)) in outputs.iter().enumerate() {
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|source| TransferError::Write {
+            path: parent.to_owned(),
+            source,
+        })?;
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                TransferError::Bundle("destination path has no valid file name".to_owned())
+            })?;
+        let temporary = parent.join(format!(
+            ".{name}.opilio-stage-{}-{index}",
+            std::process::id()
+        ));
+        let original = match fs::read(destination) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(source) => {
+                for item in &staged {
+                    let _ = fs::remove_file(&item.temporary);
+                }
+                return Err(TransferError::Read {
+                    path: (*destination).clone(),
+                    source,
+                });
+            }
+        };
+        let write_result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.write_all(contents)?;
+            file.sync_all()
+        })();
+        if let Err(source) = write_result {
+            let _ = fs::remove_file(&temporary);
+            for item in &staged {
+                let _ = fs::remove_file(&item.temporary);
+            }
+            return Err(TransferError::Write {
+                path: (*destination).clone(),
+                source,
+            });
+        }
+        staged.push(Staged {
+            destination: (*destination).clone(),
+            temporary,
+            original,
+        });
+    }
+
+    let mut committed = 0;
+    let mut attempted = 0;
+    let result = (|| {
+        for (index, item) in staged.iter().enumerate() {
+            if fail_before_commit == Some(index) {
+                return Err(io::Error::other("injected import commit failure"));
+            }
+            attempted = index + 1;
+            replace_file(&item.temporary, &item.destination)?;
+            committed += 1;
+        }
+        Ok(())
+    })();
+    if let Err(source) = result {
+        for item in staged[..attempted].iter().rev() {
+            match &item.original {
+                Some(contents) => {
+                    let _ = atomic_write(&item.destination, contents);
+                }
+                None => {
+                    let _ = fs::remove_file(&item.destination);
+                }
+            }
+        }
+        for item in &staged[committed..] {
+            let _ = fs::remove_file(&item.temporary);
+        }
+        return Err(TransferError::Write {
+            path: staged
+                .get(committed)
+                .map_or_else(PathBuf::new, |item| item.destination.clone()),
+            source,
+        });
+    }
+    Ok(())
+}
+
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    if destination.exists() {
+        fs::remove_file(destination)?;
+    }
+    fs::rename(source, destination)
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), TransferError> {
@@ -852,13 +968,67 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), TransferError> {
             .open(&temporary)?;
         file.write_all(contents)?;
         file.sync_all()?;
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
         fs::rename(&temporary, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
+
     result.map_err(|source| TransferError::Write {
         path: path.to_owned(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_CASE: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn transaction_restores_every_original_after_second_or_third_commit_failure() {
+        for failure in [1, 2] {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target/opilio-transfer-unit")
+                .join(format!(
+                    "{}-{}",
+                    std::process::id(),
+                    NEXT_CASE.fetch_add(1, Ordering::Relaxed)
+                ));
+            fs::create_dir_all(&root).unwrap();
+            let paths = [
+                root.join("config.yaml"),
+                root.join("owned-ssh"),
+                root.join("user-ssh"),
+            ];
+            for (index, path) in paths.iter().enumerate() {
+                fs::write(path, format!("original-{index}")).unwrap();
+            }
+            let replacements = [b"new-config".as_slice(), b"new-owned", b"new-user"];
+
+            let error = transactional_write_inner(
+                &[
+                    (&paths[0], replacements[0]),
+                    (&paths[1], replacements[1]),
+                    (&paths[2], replacements[2]),
+                ],
+                Some(failure),
+            )
+            .unwrap_err();
+
+            assert!(error.to_string().contains("injected import commit failure"));
+            for (index, path) in paths.iter().enumerate() {
+                assert_eq!(
+                    fs::read_to_string(path).unwrap(),
+                    format!("original-{index}")
+                );
+            }
+        }
+    }
 }

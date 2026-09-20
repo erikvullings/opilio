@@ -189,16 +189,37 @@ pub struct LifecycleCommon {
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Print the selected configuration path.
-    Path,
+    Path {
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
     /// Parse and statically validate configuration without making network calls.
-    Check,
+    Check {
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ListCommand {
     /// List configured names.
     #[command(name = "ls")]
-    List,
+    List {
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
