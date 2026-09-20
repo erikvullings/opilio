@@ -16,6 +16,10 @@ use crate::{
         ListCommand,
     },
     config::{Config, ConfigError, config_path},
+    doctor::{
+        DoctorError, DoctorProbe, DoctorRequest, SystemDoctorProbe, collect_doctor,
+        write_human as write_doctor_human, write_json as write_doctor_json,
+    },
     domain::Operation,
     history::{
         HistoryDetail, HistoryError, HistoryResult, HistoryStore, NewHistoryRecord,
@@ -51,10 +55,12 @@ pub fn run(cli: Cli) -> Result<ExitStatus, AppError> {
 
 /// Executes a parsed CLI invocation against shared application APIs.
 pub fn execute(cli: Cli, output: &mut dyn Write) -> Result<ExitStatus, AppError> {
+    let doctor = SystemDoctorProbe;
     execute_with_adapters(
         cli,
         output,
         &RuntimeStatusSource,
+        Some(&doctor),
         None,
         None,
         None,
@@ -70,10 +76,12 @@ pub fn execute_with_history(
     source: OperationSource,
     history: &HistoryStore,
 ) -> Result<ExitStatus, AppError> {
+    let doctor = SystemDoctorProbe;
     execute_with_adapters(
         cli,
         output,
         &RuntimeStatusSource,
+        Some(&doctor),
         None,
         None,
         None,
@@ -88,7 +96,36 @@ pub fn execute_with_status_source(
     output: &mut dyn Write,
     status_source: &dyn StatusSource,
 ) -> Result<ExitStatus, AppError> {
-    execute_with_adapters(cli, output, status_source, None, None, None, None, None)
+    execute_with_adapters(
+        cli,
+        output,
+        status_source,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Executes a parsed invocation with an injectable diagnostics boundary.
+pub fn execute_with_doctor_probe(
+    cli: Cli,
+    output: &mut dyn Write,
+    doctor: &dyn DoctorProbe,
+) -> Result<ExitStatus, AppError> {
+    execute_with_adapters(
+        cli,
+        output,
+        &ConfiguredStatusSource,
+        Some(doctor),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Executes a parsed invocation with an injectable interactive OpenSSH boundary.
@@ -101,6 +138,7 @@ pub fn execute_with_ssh(
         cli,
         output,
         &ConfiguredStatusSource,
+        None,
         Some(ssh),
         None,
         None,
@@ -119,6 +157,7 @@ pub fn execute_with_action_executor(
         cli,
         output,
         &ConfiguredStatusSource,
+        None,
         None,
         Some(executor),
         None,
@@ -140,6 +179,7 @@ pub fn execute_with_action_executor_and_history(
         output,
         &ConfiguredStatusSource,
         None,
+        None,
         Some(executor),
         None,
         None,
@@ -160,6 +200,7 @@ pub fn execute_with_lifecycle_executor(
         &ConfiguredStatusSource,
         None,
         None,
+        None,
         Some(executor),
         Some(confirmation),
         None,
@@ -177,6 +218,7 @@ fn execute_with_adapters(
     cli: Cli,
     output: &mut dyn Write,
     status_source: &dyn StatusSource,
+    doctor_probe: Option<&dyn DoctorProbe>,
     ssh: Option<&dyn InteractiveSsh>,
     action_executor: Option<&dyn ActionExecutor>,
     lifecycle_executor: Option<&dyn LifecycleExecutor>,
@@ -333,6 +375,30 @@ fn execute_with_adapters(
             status_source,
             history,
         ),
+        Command::Doctor {
+            target,
+            json,
+            quiet,
+        } => {
+            let config = Config::load(&path)?;
+            let system_probe = SystemDoctorProbe;
+            let probe = doctor_probe.unwrap_or(&system_probe);
+            let report = collect_doctor(
+                &config,
+                DoctorRequest {
+                    target: target.unwrap_or_else(|| "all".to_owned()),
+                },
+                probe,
+            )?;
+            if !quiet {
+                if json {
+                    write_doctor_json(output, &report)?;
+                } else {
+                    write_doctor_human(output, &report)?;
+                }
+            }
+            Ok(report.exit_status())
+        }
         Command::Config {
             command: ConfigCommand::Path,
         } => {
@@ -778,6 +844,8 @@ pub enum AppError {
     #[error(transparent)]
     Status(#[from] StatusError),
     #[error(transparent)]
+    Doctor(#[from] DoctorError),
+    #[error(transparent)]
     Action(#[from] ActionError),
     #[error(transparent)]
     Alias(#[from] AliasError),
@@ -804,6 +872,7 @@ impl AppError {
         match self {
             Self::Config(_)
             | Self::Status(_)
+            | Self::Doctor(_)
             | Self::Action(_)
             | Self::Alias(_)
             | Self::Lifecycle(_)

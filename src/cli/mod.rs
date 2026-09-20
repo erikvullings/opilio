@@ -85,6 +85,17 @@ pub enum Command {
         #[arg(long, default_value = "4", value_name = "N")]
         parallel: NonZeroUsize,
     },
+    /// Diagnose local dependencies and configured runtime resources.
+    Doctor {
+        /// Device, group, site, or `all`; defaults to all devices.
+        target: Option<String>,
+        /// Emit the stable JSON representation.
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+        /// Suppress diagnostic output; use the exit code only.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
     /// Inspect and validate configuration.
     Config {
         #[command(subcommand)]

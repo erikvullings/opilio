@@ -1,6 +1,6 @@
 # 0013 — Diagnostics and doctor
 
-**Status:** open  
+**Status:** done
 **Depends on:** 0006, 0007, 0009, 0010  
 **Spec:** `docs/OPILIO_V1_SPEC.md`
 
@@ -36,16 +36,35 @@ This is a resumable Opilio v1 task. Read the product spec and `AGENTS.md` before
 
 ## Progress
 
-- [ ] Task picked up; status changed to `in-progress` in this file and root README.
-- [ ] Implementation completed.
-- [ ] Focused tests pass.
-- [ ] Full relevant test suite/lints pass.
-- [ ] Documentation/examples updated if behavior is user-visible.
-- [ ] Status changed to `done` and root README dashboard updated.
+- [x] Task picked up; status changed to `in-progress` in this file and root README.
+- [x] Implementation completed.
+- [x] Focused tests pass.
+- [x] Full relevant test suite/lints pass.
+- [x] Documentation/examples updated if behavior is user-visible.
+- [x] Status changed to `done` and root README dashboard updated.
+
+## Decisions
+
+- `doctor` exposes a versioned typed report through a shared library API; all
+  process, network, hardware, and service work is behind `DoctorProbe`.
+- Runtime failures are separated from advisory capability absences. Missing
+  Docker/systemd, non-UMA hardware, and unsupported optional telemetry warn but
+  do not fail the command.
+- A site is reported as likely network/VPN-unreachable only when at least two
+  selected devices in that site all fail reachability. No power state is
+  inferred from reachability.
+- Exit `1` means local OpenSSH is missing or every selected device has a
+  required runtime failure; exit `3` means only some selected devices fail.
 
 ## Validation
 
-Record commands/tests and concise results here before marking done.
+- `cargo test --test doctor --test cli_doctor --quiet` — 12
+  task-specific public-interface tests passed.
+- `cargo check --all-targets --all-features` — passed.
+- `cargo fmt --all -- --check` — passed.
+- `cargo test --all-targets --all-features --quiet` — full suite passed (136
+  tests).
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 
 ## Blockers / decisions needed
 
@@ -53,4 +72,12 @@ None currently.
 
 ## Notes / handoff
 
-Add anything a fresh agent needs to resume this task.
+- 2026-09-20 Copilot: Added `doctor [target]` with human/JSON/quiet output,
+  typed actionable checks, standard aggregate exits, configured-target-only
+  probing, local OpenSSH detection, reachability/SSH classification, Shelly/WoL
+  diagnostics, system/NVIDIA telemetry capability, DGX Spark/GB10 UMA
+  detection, informative Docker/systemd presence, generic service probes,
+  site/VPN failure aggregation, advisory suggestions, and secret redaction.
+  Verified static `config check` never enters runtime probes and doctor never
+  mutates configuration. All focused/full validation passed; no known
+  task-scope limitations.

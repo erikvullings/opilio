@@ -90,9 +90,13 @@ pub struct SshTelemetryExecutor {
 }
 
 impl SshTelemetryExecutor {
+    pub fn new(ssh: OpenSsh) -> Self {
+        Self { ssh }
+    }
+
     pub fn system() -> Result<Self, String> {
         OpenSsh::system()
-            .map(|ssh| Self { ssh })
+            .map(Self::new)
             .map_err(|error| error.to_string())
     }
 }

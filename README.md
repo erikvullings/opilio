@@ -26,12 +26,12 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0010 Generic service health](TASKS/0010-generic-service-health.md) | done | 0004 | Generic health/status/info incl. LLM model name |
 | [0011 Operation history and logging](TASKS/0011-operation-history-and-logging.md) | done | 0005, 0008 | Rotating JSONL history + bounded failure output |
 | [0012 Build the TUI dashboard](TASKS/0012-build-tui-dashboard.md) | done | 0008, 0009, 0010, 0011 | Keyboard-first live fleet dashboard |
-| [0013 Diagnostics and doctor](TASKS/0013-diagnostics-and-doctor.md) | open | 0006, 0007, 0009, 0010 | Static config check + runtime diagnostics |
+| [0013 Diagnostics and doctor](TASKS/0013-diagnostics-and-doctor.md) | done | 0006, 0007, 0009, 0010 | Static config check + runtime diagnostics |
 | [0014 Native scheduling adapters](TASKS/0014-native-scheduling-adapters.md) | open | 0005, 0011 | Linux/macOS/Windows schedule ls/add/rm |
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `12 / 16` tasks done.
+**Overall status:** implementation in progress. `13 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -68,6 +68,7 @@ environment references such as `${env:OPILIO_SHELLY_HOME_PASSWORD}`.
 ```sh
 opilio config path
 opilio config check
+opilio doctor [device|group|site|all] [--json] [--quiet]
 opilio status [device|group|site|all]
 opilio on <device|group|site|all> [--wait] [--yes] [--parallel N]
 opilio off <device|group|site|all> [--yes] [--force] [--parallel N]
@@ -96,6 +97,16 @@ immediately. Telemetry graphs are intentionally memory-only.
 
 `config check` only parses and statically validates configuration. It performs
 no network, process, or hardware probes.
+
+`doctor` is the separate runtime diagnostic path. It checks local system
+OpenSSH, then only the configured resources selected by its optional target:
+endpoint reachability, SSH authentication, power and telemetry providers,
+generic services, and informative NVIDIA/UMA, Docker, and systemd capabilities.
+Likely site-wide network/VPN failures are grouped without guessing that hosts
+are powered off. Human and versioned JSON results include advisory corrections,
+never edit configuration, redact configured secret references and resolved
+values, and use the standard success/failure/partial-success exit codes. Doctor
+does not scan the LAN.
 
 `ssh` accepts exactly one configured device and hands the terminal directly to
 system OpenSSH, preserving aliases, keys, ProxyJump, agents, and host-key rules

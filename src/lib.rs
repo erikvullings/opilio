@@ -5,6 +5,7 @@ pub mod alias;
 pub mod app;
 pub mod cli;
 pub mod config;
+pub mod doctor;
 pub mod domain;
 pub mod history;
 pub mod lifecycle;
