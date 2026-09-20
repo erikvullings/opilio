@@ -18,8 +18,8 @@ use crate::{
     },
     ssh::{InteractiveSsh, OpenSsh, SshError},
     status::{
-        ConfiguredStatusSource, ExitStatus, StatusError, StatusRequest, StatusSource,
-        collect_status, write_human, write_json,
+        ConfiguredStatusSource, ExitStatus, RuntimeStatusSource, StatusError, StatusRequest,
+        StatusSource, collect_status, write_human, write_json,
     },
     tui,
 };
@@ -31,7 +31,7 @@ pub fn run(cli: Cli) -> Result<ExitStatus, AppError> {
 
 /// Executes a parsed CLI invocation against shared application APIs.
 pub fn execute(cli: Cli, output: &mut dyn Write) -> Result<ExitStatus, AppError> {
-    execute_with_status_source(cli, output, &ConfiguredStatusSource)
+    execute_with_status_source(cli, output, &RuntimeStatusSource)
 }
 
 /// Executes a parsed invocation with an injectable status boundary.

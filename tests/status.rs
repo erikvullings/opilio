@@ -13,6 +13,10 @@ use opilio::{
         ConcurrentExecutor, ConfiguredStatusSource, ExitStatus, StatusRequest, StatusSource,
         StatusState, collect_status,
     },
+    telemetry::{
+        Metric, ProviderSnapshot, TelemetrySnapshot,
+        system::{LoadAverage, SystemMemory, SystemMetrics},
+    },
 };
 
 const CONFIG: &str = r#"
@@ -138,4 +142,58 @@ fn exit_status_codes_cover_success_failure_usage_and_partial_success() {
         "unknown target `missing`; expected a device, group, site, or `all`"
     );
     assert_eq!(ExitStatus::PartialSuccess.code(), 3);
+}
+
+struct TelemetryFixture;
+
+impl StatusSource for TelemetryFixture {
+    fn status(&self, _device_name: &str, _device: &Device) -> Result<StatusState, String> {
+        Ok(StatusState::Configured)
+    }
+
+    fn telemetry(&self, _device_name: &str, device: &Device) -> Option<TelemetrySnapshot> {
+        device.telemetry.as_ref()?;
+        Some(TelemetrySnapshot {
+            collected_at_unix_ms: 1_000,
+            system: ProviderSnapshot::Available {
+                data: SystemMetrics {
+                    cpu_busy_percent: Metric::available(12.5),
+                    logical_cpus: Metric::available(4),
+                    load: LoadAverage {
+                        one: Metric::available(0.5),
+                        five: Metric::available(0.4),
+                        fifteen: Metric::available(0.3),
+                    },
+                    memory: SystemMemory {
+                        total_bytes: Metric::available(1024),
+                        available_bytes: Metric::available(512),
+                    },
+                    uptime_seconds: Metric::available(60),
+                },
+            },
+            nvidia: None,
+        })
+    }
+}
+
+#[test]
+fn configured_telemetry_is_exposed_without_changing_schema_for_other_devices() {
+    let config = Config::from_yaml(&CONFIG.replace(
+        "    site: home",
+        "    site: home\n    telemetry:\n      provider: system",
+    ))
+    .unwrap();
+
+    let report = collect_status(&config, StatusRequest::default(), &TelemetryFixture).unwrap();
+    let json = serde_json::to_value(&report).unwrap();
+
+    assert_eq!(
+        json["devices"][0]["telemetry"]["system"]["state"],
+        "available"
+    );
+    assert_eq!(
+        json["devices"][0]["telemetry"]["system"]["data"]["cpu_busy_percent"],
+        serde_json::json!({"state": "available", "value": 12.5})
+    );
+    assert!(json["devices"][1].get("telemetry").is_none());
 }

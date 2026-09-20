@@ -1,0 +1,11 @@
+--- loadavg ---
+not-a-number 0.31
+--- meminfo ---
+MemTotal: unknown kB
+MemAvailable:
+--- uptime ---
+unknown
+--- stat-before ---
+cpu broken
+--- stat-after ---
+cpu broken

@@ -12,7 +12,13 @@ use std::{
 
 use serde::Serialize;
 
-use crate::{config::Config, domain::Device, target::TargetError};
+use crate::{
+    config::Config,
+    domain::Device,
+    ssh::CancellationToken,
+    target::TargetError,
+    telemetry::{SshTelemetryExecutor, TelemetryCollector, TelemetrySnapshot},
+};
 
 const DEFAULT_STATUS_PARALLELISM: usize = 4;
 
@@ -33,6 +39,10 @@ impl Default for StatusRequest {
 
 pub trait StatusSource: Sync {
     fn status(&self, device_name: &str, device: &Device) -> Result<StatusState, String>;
+
+    fn telemetry(&self, _device_name: &str, _device: &Device) -> Option<TelemetrySnapshot> {
+        None
+    }
 }
 
 #[derive(Debug, Default)]
@@ -44,6 +54,35 @@ impl StatusSource for ConfiguredStatusSource {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct RuntimeStatusSource;
+
+impl StatusSource for RuntimeStatusSource {
+    fn status(&self, _device_name: &str, _device: &Device) -> Result<StatusState, String> {
+        Ok(StatusState::Configured)
+    }
+
+    fn telemetry(&self, _device_name: &str, device: &Device) -> Option<TelemetrySnapshot> {
+        let provider = device.telemetry.clone()?;
+        match SshTelemetryExecutor::system() {
+            Ok(remote) => Some(TelemetryCollector::new(&remote).collect(
+                &device.ssh,
+                &device.shell,
+                provider,
+                &CancellationToken::new(),
+            )),
+            Err(error) => Some(TelemetrySnapshot {
+                collected_at_unix_ms: crate::telemetry::unix_ms_now(),
+                system: crate::telemetry::ProviderSnapshot::Unavailable {
+                    error: error.clone(),
+                },
+                nvidia: matches!(provider, crate::domain::Telemetry::Nvidia)
+                    .then_some(crate::telemetry::ProviderSnapshot::Unavailable { error }),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusState {
@@ -51,13 +90,15 @@ pub enum StatusState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DeviceStatusResult {
     pub device: String,
     pub site: Option<String>,
     pub ssh: String,
     pub status: StatusState,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetrySnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -67,7 +108,7 @@ pub struct StatusSummary {
     pub failed: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StatusReport {
     pub schema_version: u8,
     pub target: String,
@@ -200,6 +241,7 @@ pub fn collect_status(
                 ssh: device.ssh.clone(),
                 status,
                 error: None,
+                telemetry: source.telemetry(name, device),
             },
             Err(error) => DeviceStatusResult {
                 device: (*name).to_owned(),
@@ -207,6 +249,7 @@ pub fn collect_status(
                 ssh: device.ssh.clone(),
                 status: StatusState::Failed,
                 error: Some(error),
+                telemetry: None,
             },
         }
     });

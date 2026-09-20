@@ -1,0 +1,16 @@
+"index"
+The index of the GPU.
+"uuid"
+The globally unique immutable UUID.
+"name"
+The official product name of the GPU.
+"utilization.gpu"
+Percent of time over the past sample period.
+"temperature.gpu"
+Core GPU temperature.
+"power.draw"
+The last measured power draw.
+"memory.total"
+Total installed GPU memory.
+"memory.used"
+Used GPU memory.

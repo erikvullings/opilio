@@ -22,7 +22,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0006 Shelly power provider](TASKS/0006-shelly-power-provider.md) | done | 0003 | Local Shelly switching + electrical telemetry |
 | [0007 Wake-on-LAN provider](TASKS/0007-wake-on-lan-provider.md) | done | 0003 | WoL power-on support |
 | [0008 Safe lifecycle operations](TASKS/0008-safe-lifecycle-operations.md) | done | 0004, 0006, 0007 | on/off/reboot/power-cycle safety semantics |
-| [0009 System and NVIDIA telemetry](TASKS/0009-system-and-nvidia-telemetry.md) | open | 0004 | CPU/RAM/GPU + DGX Spark UMA-aware telemetry |
+| [0009 System and NVIDIA telemetry](TASKS/0009-system-and-nvidia-telemetry.md) | done | 0004 | CPU/RAM/GPU + DGX Spark UMA-aware telemetry |
 | [0010 Generic service health](TASKS/0010-generic-service-health.md) | open | 0004 | Generic health/status/info incl. LLM model name |
 | [0011 Operation history and logging](TASKS/0011-operation-history-and-logging.md) | open | 0005, 0008 | Rotating JSONL history + bounded failure output |
 | [0012 Build the TUI dashboard](TASKS/0012-build-tui-dashboard.md) | open | 0008, 0009, 0010, 0011 | Keyboard-first live fleet dashboard |
@@ -31,7 +31,7 @@ The task decomposition follows the tracer-bullet principle used by Matt Pocock's
 | [0015 Portable export and import](TASKS/0015-portable-export-and-import.md) | open | 0002, 0004, 0013 | Safe setup migration + selective SSH config |
 | [0016 Cross-platform hardening and release](TASKS/0016-cross-platform-hardening-release.md) | open | 0012, 0013, 0014, 0015 | v1 acceptance, docs, packaging, CI |
 
-**Overall status:** implementation in progress. `8 / 16` tasks done.
+**Overall status:** implementation in progress. `9 / 16` tasks done.
 
 ## Suggested milestones
 
@@ -94,11 +94,19 @@ may set `shell` for remote command actions; it defaults to `/bin/sh`, invoked
 explicitly with `-lc`.
 
 `status` defaults to all devices and currently reports the reachability-neutral
-`configured` state. Use `--json` for the stable versioned result document,
-`--quiet` to rely on the exit code alone, and `--parallel N` to bound concurrent
-device work. JSON includes `schema_version`, the requested `target`, aggregate
-counts, and sorted per-device `device`, `site`, `ssh`, `status`, and `error`
-fields.
+`configured` state. Devices with `telemetry.provider: system` or `nvidia` also
+collect Linux CPU/load, RAM, and uptime over OpenSSH; the NVIDIA provider
+discovers supported `nvidia-smi` fields and adds GPU utilization, temperature,
+power, and memory semantics. DGX Spark/GB10 reports `unified` memory and marks
+conventional GPU-memory totals/usage unsupported rather than presenting them as
+VRAM. Unavailable and unsupported providers/metrics remain explicit in JSON.
+TUI callers can reuse the same provider API with an OpenSSH ControlMaster and
+bounded in-memory time-series buffers. Use `--json` for the stable versioned
+result document, `--quiet` to rely on the exit code alone, and `--parallel N` to
+bound concurrent device work. JSON includes `schema_version`, the requested
+`target`, aggregate counts, and sorted per-device `device`, `site`, `ssh`,
+`status`, and `error` fields; the optional `telemetry` field is omitted for
+devices without a configured provider.
 
 Named actions resolve implementations per device in the order device override,
 one unambiguous group override, then default. Shell actions use each device's
