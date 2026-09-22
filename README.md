@@ -7,6 +7,9 @@ DGX Spark systems. It uses the OpenSSH setup you already have, talks directly
 to optional Shelly plugs or Wake-on-LAN, and installs nothing on managed
 devices.
 
+The name comes from Latin: *opilio* means **shepherd**—a fitting name for a
+tool that watches over and operates a flock of machines.
+
 ![Opilio TUI showing two machines, RAM and GPU histories, power draw, and two running model services](docs/assets/opilio-tui.png)
 
 ## What it does
