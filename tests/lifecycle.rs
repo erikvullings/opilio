@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
+    path::PathBuf,
+    sync::Arc,
     sync::Mutex,
     sync::atomic::{AtomicUsize, Ordering},
     thread,
@@ -11,12 +13,33 @@ use opilio::{
     config::Config,
     lifecycle::{
         DeviceLifecycleResult, LifecycleError, LifecycleExecutor, LifecycleOperation,
-        LifecycleRequest, LifecycleState, PlannedStep, execute_lifecycle, plan_lifecycle,
-        write_human, write_json,
+        LifecycleRequest, LifecycleState, PlannedStep, SystemLifecycleExecutor, execute_lifecycle,
+        plan_lifecycle, write_human, write_json,
     },
     power::PowerCapabilities,
+    ssh::{ProcessAdapter, ProcessError, ProcessOutput, ProcessRequest},
     status::ExitStatus,
 };
+
+struct FailingSudoProcess;
+
+impl ProcessAdapter for FailingSudoProcess {
+    fn find_executable(&self, name: &str) -> Option<PathBuf> {
+        (name == "ssh").then(|| PathBuf::from("/test/ssh"))
+    }
+
+    fn run(&self, _request: &ProcessRequest) -> Result<ProcessOutput, ProcessError> {
+        Ok(ProcessOutput {
+            exit_code: Some(1),
+            stderr: b"sudo: a password is required".to_vec(),
+            ..ProcessOutput::default()
+        })
+    }
+
+    fn interactive(&self, _request: &ProcessRequest) -> Result<i32, ProcessError> {
+        unreachable!()
+    }
+}
 
 const CONFIG: &str = r#"
 sites:
@@ -105,6 +128,25 @@ fn request(operation: LifecycleOperation, target: &str) -> LifecycleRequest {
         wait: false,
         parallelism: NonZeroUsize::MIN,
     }
+}
+
+#[test]
+fn production_executor_explains_noninteractive_sudo_failures_without_echoing_output() {
+    let config = Config::from_yaml(CONFIG).unwrap();
+    let ssh = opilio::ssh::OpenSsh::discover(Arc::new(FailingSudoProcess)).unwrap();
+    let executor = SystemLifecycleExecutor::new(ssh);
+
+    let error = executor
+        .execute_step(
+            "shelly",
+            &config.devices()["shelly"],
+            PlannedStep::GracefulShutdown,
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+
+    assert!(error.contains("non-interactive sudo authorization"));
+    assert!(!error.contains("a password is required"));
 }
 
 #[test]

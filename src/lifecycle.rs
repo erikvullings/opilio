@@ -327,8 +327,18 @@ impl SystemLifecycleExecutor {
         } else if output.timed_out {
             Err(LifecycleSystemError("SSH command timed out".to_owned()))
         } else {
+            let uses_sudo = command
+                .split_whitespace()
+                .next()
+                .is_some_and(|program| program == "sudo");
+            let sudo_hint = if uses_sudo {
+                "; non-interactive sudo authorization may be required \
+                 (configure an exact NOPASSWD rule or a non-sudo command)"
+            } else {
+                ""
+            };
             Err(LifecycleSystemError(format!(
-                "SSH command failed{}",
+                "SSH command failed{}{sudo_hint}",
                 output
                     .exit_code
                     .map_or_else(String::new, |code| format!(" with exit code {code}"))
