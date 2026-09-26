@@ -563,12 +563,13 @@ fn unreachable_sample(
     power: Option<&(OutletState, Option<f64>, Option<String>)>,
     error: String,
 ) -> DashboardSample {
-    sample.state = if power.is_some_and(|(outlet, _, _)| *outlet == OutletState::Off) {
-        DeviceState::Off
+    if let Some((OutletState::Off, _, power_error)) = power {
+        sample.state = DeviceState::Off;
+        sample.error.clone_from(power_error);
     } else {
-        DeviceState::Unreachable
-    };
-    sample.error = Some(error);
+        sample.state = DeviceState::Unreachable;
+        sample.error = Some(error);
+    }
     sample
 }
 
@@ -977,11 +978,16 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use crate::ssh::{ProcessAdapter, ProcessError, ProcessOutput, ProcessRequest};
+    use crate::{
+        power::OutletState,
+        ssh::{ProcessAdapter, ProcessError, ProcessOutput, ProcessRequest},
+        tui::DashboardSample,
+    };
 
     use super::{
         CancellationToken, Config, ControlMasterPool, DeviceState, OpenSsh, RuntimeMessage,
         SSH_STARTUP_TIMEOUT, control_path, model_names, mpsc, poll_device, send_operation_failures,
+        unreachable_sample,
     };
 
     struct FakeProcess {
@@ -1096,6 +1102,28 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn confirmed_power_off_does_not_report_expected_ssh_loss() {
+        let sample = unreachable_sample(
+            DashboardSample {
+                device: "alpha".into(),
+                state: DeviceState::Unknown,
+                ram_percent: None,
+                ram_used_bytes: None,
+                ram_total_bytes: None,
+                gpu_percent: None,
+                watts: None,
+                services: None,
+                error: None,
+            },
+            Some(&(OutletState::Off, None, None)),
+            "Connection closed by alpha port 22".into(),
+        );
+
+        assert_eq!(sample.state, DeviceState::Off);
+        assert_eq!(sample.error, None);
     }
 
     #[test]

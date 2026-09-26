@@ -182,7 +182,7 @@ cargo fmt --check
 CI runs these checks on Linux, macOS, and Windows.
 
 <details>
-<summary>Implementation status — 20 / 20 tasks done</summary>
+<summary>Implementation status — 21 / 21 tasks done</summary>
 
 | Task | Status | Depends on | Outcome |
 |---|---|---|---|
@@ -206,5 +206,6 @@ CI runs these checks on Linux, macOS, and Windows.
 | [0018 Refine TUI details layout](TASKS/0018-refine-tui-details-layout.md) | done | 0017 | Aligned details, intentional spacing, conditional power |
 | [0019 Diagnose lifecycle sudo failures](TASKS/0019-diagnose-lifecycle-sudo-failures.md) | done | 0008 | Actionable non-interactive sudo failures |
 | [0020 Rewrite product README](TASKS/0020-rewrite-readme.md) | done | 0016, 0018 | Function-first landing page and TUI screenshot |
+| [0021 Distinguish TUI status errors](TASKS/0021-distinguish-tui-status-errors.md) | done | 0012, 0019 | Separate polling details from operation failures |
 
 </details>

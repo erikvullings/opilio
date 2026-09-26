@@ -142,7 +142,24 @@ fn preexecution_failure_clears_and_marks_every_selected_device() {
 }
 
 #[test]
-fn telemetry_samples_are_bounded_and_keep_service_and_failure_details() {
+fn successful_operation_clears_an_earlier_operation_failure() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::OperationFinished {
+        device: "alpha".to_owned(),
+        operation: "off".to_owned(),
+        result: Err("sudo authorization failed".to_owned()),
+    });
+    dashboard.update(Event::OperationFinished {
+        device: "alpha".to_owned(),
+        operation: "off".to_owned(),
+        result: Ok(DeviceState::Off),
+    });
+
+    assert_eq!(dashboard.device("alpha").unwrap().recent_failure, None);
+}
+
+#[test]
+fn telemetry_samples_are_bounded_and_keep_service_and_status_details() {
     let mut dashboard = Dashboard::from_config(&config());
     for value in 0..80 {
         dashboard.update(Event::PollCompleted(DashboardSample {
@@ -176,11 +193,31 @@ fn telemetry_samples_are_bounded_and_keep_service_and_failure_details() {
     assert!(render_to_string(&dashboard, 120, 30).contains("2m"));
     assert!(
         device
-            .recent_failure
+            .status_detail
             .as_deref()
             .unwrap()
             .contains("probe failed")
     );
+}
+
+#[test]
+fn polling_error_is_labeled_as_status_detail_not_operation_failure() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Unreachable,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: None,
+        services: None,
+        error: Some("Connection closed by alpha port 22".into()),
+    }));
+
+    let rendered = render_to_string(&dashboard, 120, 30);
+    assert!(rendered.contains("Status detail: Connection closed by alpha port 22"));
+    assert!(!rendered.contains("Recent failure"));
 }
 
 #[test]

@@ -127,11 +127,20 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
     } else {
         4
     };
+    let mut messages = Vec::new();
     if let Some(error) = &device.recent_failure {
+        messages.push(
+            Line::from(format!("Recent failure: {error}")).style(Style::default().fg(Color::Red)),
+        );
+    }
+    if let Some(error) = &device.status_detail {
+        messages.push(
+            Line::from(format!("Status detail: {error}")).style(Style::default().fg(Color::Yellow)),
+        );
+    }
+    if !messages.is_empty() {
         frame.render_widget(
-            Paragraph::new(format!("Recent failure: {error}"))
-                .style(Style::default().fg(Color::Red))
-                .wrap(Wrap { trim: true }),
+            Paragraph::new(messages).wrap(Wrap { trim: true }),
             chunks[error_chunk],
         );
     }

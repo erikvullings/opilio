@@ -57,6 +57,7 @@ pub struct DashboardDevice {
     pub gpu_history: VecDeque<MetricSample>,
     pub watts_history: VecDeque<MetricSample>,
     pub services: Vec<DashboardService>,
+    pub status_detail: Option<String>,
     pub recent_failure: Option<String>,
     pub busy: Option<String>,
 }
@@ -234,6 +235,7 @@ impl Dashboard {
                         gpu_history: VecDeque::with_capacity(HISTORY_CAPACITY),
                         watts_history: VecDeque::with_capacity(HISTORY_CAPACITY),
                         services: Vec::new(),
+                        status_detail: None,
                         recent_failure: None,
                         busy: None,
                     },
@@ -269,7 +271,10 @@ impl Dashboard {
                 if let Some(item) = self.devices.get_mut(&device) {
                     item.busy = None;
                     match result {
-                        Ok(state) => item.state = state,
+                        Ok(state) => {
+                            item.state = state;
+                            item.recent_failure = None;
+                        }
                         Err(error) => {
                             item.state = DeviceState::Error;
                             item.recent_failure = Some(error);
@@ -482,9 +487,7 @@ impl Dashboard {
         if let Some(services) = sample.services {
             device.services = services;
         }
-        if let Some(error) = sample.error {
-            device.recent_failure = Some(error);
-        }
+        device.status_detail = sample.error;
     }
 
     fn current_target(&self) -> String {

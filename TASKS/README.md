@@ -34,3 +34,4 @@ Task details and resumable notes live in the linked files. The root
 - [x] [0018 Refine TUI details layout](0018-refine-tui-details-layout.md)
 - [x] [0019 Diagnose lifecycle sudo failures](0019-diagnose-lifecycle-sudo-failures.md)
 - [x] [0020 Rewrite product README](0020-rewrite-readme.md)
+- [x] [0021 Distinguish TUI status errors](0021-distinguish-tui-status-errors.md)
