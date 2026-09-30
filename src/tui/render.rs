@@ -46,25 +46,24 @@ pub fn render(frame: &mut Frame<'_>, dashboard: &Dashboard) {
 }
 
 fn render_scopes(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
+    let focused = dashboard.scopes_focused();
     let items = dashboard.scopes().map(|(name, selected)| {
         let marker = if selected { "> " } else { "  " };
-        ListItem::new(format!("{marker}{name}"))
+        ListItem::new(format!("{marker}{name}")).style(selection_style(focused && selected))
     });
     frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title(" Sites / Groups ")
-                .borders(Borders::ALL),
-        ),
+        List::new(items).block(panel_block("Sites / Groups", focused)),
         area,
     );
 }
 
 fn render_devices(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
+    let focused = dashboard.devices_focused();
     let selected = dashboard.selected_device();
     let items = dashboard.visible_devices().into_iter().map(|name| {
         let device = dashboard.device(name).expect("visible device exists");
-        let marker = if selected == Some(name) { ">" } else { " " };
+        let selected = selected == Some(name);
+        let marker = if selected { ">" } else { " " };
         let busy = device
             .busy
             .as_deref()
@@ -75,11 +74,43 @@ fn render_devices(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
             Span::styled(device.state.label(), style),
             Span::raw(busy),
         ]))
+        .style(selection_style(focused && selected))
     });
     frame.render_widget(
-        List::new(items).block(Block::default().title(" Devices ").borders(Borders::ALL)),
+        List::new(items).block(panel_block("Devices", focused)),
         area,
     );
+}
+
+fn panel_block(title: &str, focused: bool) -> Block<'_> {
+    let title = if focused {
+        format!(" {title} [focus] ")
+    } else {
+        format!(" {title} ")
+    };
+    let block = Block::default().title(title).borders(Borders::ALL);
+    if focused {
+        block
+            .border_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .border_type(ratatui::widgets::BorderType::Thick)
+    } else {
+        block
+    }
+}
+
+fn selection_style(selected: bool) -> Style {
+    if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
 }
 
 fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
@@ -112,8 +143,24 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         .constraints(constraints)
         .split(inner);
     frame.render_widget(Paragraph::new(details), chunks[0]);
-    metric_history(frame, "RAM used", "%", &device.ram_history, chunks[1], None);
-    metric_history(frame, "GPU busy", "%", &device.gpu_history, chunks[3], None);
+    metric_history(
+        frame,
+        "RAM used",
+        "%",
+        &device.ram_history,
+        chunks[1],
+        None,
+        Some((0.0, 100.0)),
+    );
+    metric_history(
+        frame,
+        "GPU busy",
+        "%",
+        &device.gpu_history,
+        chunks[3],
+        None,
+        Some((0.0, 100.0)),
+    );
     let error_chunk = if show_power {
         metric_history(
             frame,
@@ -121,6 +168,7 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
             " W",
             &device.watts_history,
             chunks[4],
+            None,
             None,
         );
         5
@@ -251,6 +299,7 @@ fn metric_history(
     values: &std::collections::VecDeque<MetricSample>,
     area: Rect,
     empty_message: Option<&str>,
+    fixed_scale: Option<(f64, f64)>,
 ) {
     let Some(current) = values.back().map(|sample| sample.0) else {
         frame.render_widget(
@@ -271,15 +320,18 @@ fn metric_history(
         .iter()
         .map(|sample| sample.0)
         .fold(f64::NEG_INFINITY, f64::max);
-    let padding = ((maximum - minimum) * 0.1)
-        .max(current.abs() * 0.005)
-        .max(0.1);
-    let scale_min = (minimum - padding).max(0.0);
-    let scale_max = maximum + padding;
+    let (scale_min, scale_max) = fixed_scale.unwrap_or_else(|| {
+        let padding = ((maximum - minimum) * 0.1)
+            .max(current.abs() * 0.005)
+            .max(0.1);
+        ((minimum - padding).max(0.0), maximum + padding)
+    });
     let scale_range = (scale_max - scale_min).max(f64::EPSILON);
     let plotted = values
         .iter()
-        .map(|sample| (((sample.0 - scale_min) / scale_range) * 1000.0).round() as u64)
+        .map(|sample| {
+            ((((sample.0 - scale_min) / scale_range).clamp(0.0, 1.0)) * 1000.0).round() as u64
+        })
         .collect::<Vec<_>>();
     let window = format_window(values.len());
     let title =

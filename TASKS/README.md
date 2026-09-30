@@ -36,3 +36,4 @@ Task details and resumable notes live in the linked files. The root
 - [x] [0020 Rewrite product README](0020-rewrite-readme.md)
 - [x] [0021 Distinguish TUI status errors](0021-distinguish-tui-status-errors.md)
 - [x] [0022 Reduce Shelly auth requests](0022-reduce-shelly-auth-requests.md)
+- [x] [0023 Clarify TUI scale and focus](0023-clarify-tui-scale-and-focus.md)
