@@ -182,7 +182,7 @@ cargo fmt --check
 CI runs these checks on Linux, macOS, and Windows.
 
 <details>
-<summary>Implementation status — 21 / 21 tasks done</summary>
+<summary>Implementation status — 22 / 22 tasks done</summary>
 
 | Task | Status | Depends on | Outcome |
 |---|---|---|---|
@@ -207,5 +207,6 @@ CI runs these checks on Linux, macOS, and Windows.
 | [0019 Diagnose lifecycle sudo failures](TASKS/0019-diagnose-lifecycle-sudo-failures.md) | done | 0008 | Actionable non-interactive sudo failures |
 | [0020 Rewrite product README](TASKS/0020-rewrite-readme.md) | done | 0016, 0018 | Function-first landing page and TUI screenshot |
 | [0021 Distinguish TUI status errors](TASKS/0021-distinguish-tui-status-errors.md) | done | 0012, 0019 | Separate polling details from operation failures |
+| [0022 Reduce Shelly auth requests](TASKS/0022-reduce-shelly-auth-requests.md) | done | 0006, 0012 | Cache digest auth and prevent HTTP 429 |
 
 </details>
