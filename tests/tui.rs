@@ -288,8 +288,9 @@ fn stable_renderer_shows_master_detail_status_and_shortcuts() {
         "running",
         "RAM used",
         "92.0 / 128.0 GiB",
+        "now 92.0 GiB (72.4%)",
         "GPU busy",
-        "now 72.4%",
+        "now 87.6%",
         "min 72.4",
         "2s",
         "sglang-main",
@@ -351,6 +352,25 @@ fn percentage_history_uses_absolute_scale_near_capacity() {
             .any(|character| "▁▂▃▄▅▆▇█".contains(character)),
         "96% should reach the graph's top row\n{rendered}"
     );
+}
+
+#[test]
+fn ram_history_falls_back_to_percentage_without_byte_telemetry() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Running,
+        ram_percent: Some(64.0),
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: None,
+        services: None,
+        error: None,
+    }));
+
+    let rendered = render_to_string(&dashboard, 120, 30);
+    assert!(rendered.contains("RAM used  now 64.0%"));
 }
 
 #[test]
