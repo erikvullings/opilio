@@ -143,13 +143,16 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         .constraints(constraints)
         .split(inner);
     frame.render_widget(Paragraph::new(details), chunks[0]);
+    let ram_used = device
+        .ram_used_bytes
+        .map(|bytes| format!("{:.1} GiB", gibibytes(bytes)));
     metric_history(
         frame,
         "RAM used",
         "%",
         &device.ram_history,
         chunks[1],
-        None,
+        ram_used.as_deref(),
         Some((0.0, 100.0)),
     );
     metric_history(
@@ -298,12 +301,12 @@ fn metric_history(
     unit: &str,
     values: &std::collections::VecDeque<MetricSample>,
     area: Rect,
-    empty_message: Option<&str>,
+    current_absolute: Option<&str>,
     fixed_scale: Option<(f64, f64)>,
 ) {
     let Some(current) = values.back().map(|sample| sample.0) else {
         frame.render_widget(
-            Paragraph::new(empty_message.unwrap_or("No samples yet")).block(
+            Paragraph::new("No samples yet").block(
                 Block::default()
                     .title(format!(" {title} "))
                     .borders(Borders::ALL),
@@ -334,8 +337,11 @@ fn metric_history(
         })
         .collect::<Vec<_>>();
     let window = format_window(values.len());
-    let title =
-        format!(" {title}  now {current:.1}{unit}  min {minimum:.1}  max {maximum:.1}  {window} ");
+    let current = current_absolute.map_or_else(
+        || format!("{current:.1}{unit}"),
+        |absolute| format!("{absolute} ({current:.1}{unit})"),
+    );
+    let title = format!(" {title}  now {current}  min {minimum:.1}  max {maximum:.1}  {window} ");
     frame.render_widget(
         Sparkline::default()
             .block(Block::default().title(title).borders(Borders::ALL))
