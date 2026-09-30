@@ -325,6 +325,49 @@ fn stable_renderer_shows_master_detail_status_and_shortcuts() {
 }
 
 #[test]
+fn percentage_history_uses_absolute_scale_near_capacity() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Running,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: Some(96.0),
+        watts: None,
+        services: None,
+        error: None,
+    }));
+
+    let rendered = render_to_string(&dashboard, 120, 30);
+    let lines = rendered.lines().collect::<Vec<_>>();
+    let title = lines
+        .iter()
+        .position(|line| line.contains("GPU busy  now"))
+        .unwrap();
+    assert!(
+        lines[title + 1]
+            .chars()
+            .any(|character| "▁▂▃▄▅▆▇█".contains(character)),
+        "96% should reach the graph's top row\n{rendered}"
+    );
+}
+
+#[test]
+fn focused_panel_is_explicit_and_moves_with_horizontal_navigation() {
+    let mut dashboard = Dashboard::from_config(&config());
+
+    let devices_focused = render_to_string(&dashboard, 120, 30);
+    assert!(devices_focused.contains("Devices [focus]"));
+    assert!(!devices_focused.contains("Sites / Groups [focus]"));
+
+    dashboard.update(Event::Key(Key::Left));
+    let scopes_focused = render_to_string(&dashboard, 120, 30);
+    assert!(scopes_focused.contains("Sites / Groups [focus]"));
+    assert!(!scopes_focused.contains("Devices [focus]"));
+}
+
+#[test]
 fn renderer_remains_safe_at_a_compact_terminal_size() {
     let dashboard = Dashboard::from_config(&config());
     let rendered = render_to_string(&dashboard, 80, 20);

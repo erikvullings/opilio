@@ -508,6 +508,14 @@ impl Dashboard {
         &self.scopes[self.selected_scope].target
     }
 
+    pub(crate) fn scopes_focused(&self) -> bool {
+        self.focus == Focus::Scopes
+    }
+
+    pub(crate) fn devices_focused(&self) -> bool {
+        self.focus == Focus::Devices
+    }
+
     pub fn visible_devices(&self) -> Vec<&str> {
         let scope = &self.scopes[self.selected_scope].kind;
         let filter = self.filter.to_ascii_lowercase();
