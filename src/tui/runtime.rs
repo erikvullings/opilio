@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::{self, IsTerminal, Stdout},
     num::NonZeroUsize,
     sync::{
@@ -12,7 +12,6 @@ use std::{
 
 #[cfg(not(windows))]
 use std::{
-    collections::HashMap,
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
@@ -60,6 +59,7 @@ use super::{
 };
 
 const EVENT_TICK: Duration = Duration::from_millis(100);
+const POWER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const POWER_TIMEOUT: Duration = Duration::from_secs(2);
 const SSH_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -75,6 +75,87 @@ enum RuntimeMessage {
 struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     active: bool,
+}
+
+type RuntimeShellyProvider = ShellyProvider<ShellyHttpClient>;
+type PowerObservation = (OutletState, Option<f64>, Option<String>);
+
+struct CachedPowerProvider {
+    provider: RuntimeShellyProvider,
+    observations: Mutex<PowerObservationCache>,
+}
+
+#[derive(Default)]
+struct PowerObservationCache {
+    last: Option<(Instant, PowerObservation)>,
+    consecutive_rate_limits: usize,
+}
+
+impl PowerObservationCache {
+    fn observe(
+        &mut self,
+        now: Instant,
+        fetch: impl FnOnce() -> PowerObservation,
+    ) -> PowerObservation {
+        if let Some((sampled_at, observation)) = &self.last
+            && now.duration_since(*sampled_at) < POWER_POLL_INTERVAL
+        {
+            return observation.clone();
+        }
+        let observation = fetch();
+        let rate_limited = observation
+            .2
+            .as_deref()
+            .is_some_and(|error| error.contains("HTTP 429"));
+        if rate_limited {
+            self.consecutive_rate_limits = self.consecutive_rate_limits.saturating_add(1);
+            if let Some((_, previous)) = &self.last
+                && (previous.0 != OutletState::Unknown || previous.1.is_some())
+                && previous.2.is_none()
+            {
+                let previous = previous.clone();
+                self.last = Some((now, previous.clone()));
+                return previous;
+            }
+            if self.consecutive_rate_limits < 3 {
+                let pending = (OutletState::Unknown, None, None);
+                self.last = Some((now, pending.clone()));
+                return pending;
+            }
+        } else {
+            self.consecutive_rate_limits = 0;
+        }
+        self.last = Some((now, observation.clone()));
+        observation
+    }
+}
+
+struct PowerProviderPool {
+    providers: HashMap<String, Result<Arc<CachedPowerProvider>, String>>,
+}
+
+impl PowerProviderPool {
+    fn new(config: &Config) -> Self {
+        let providers = config
+            .devices()
+            .iter()
+            .filter(|(_, device)| {
+                matches!(device.power, Some(ConfiguredPowerProvider::Shelly { .. }))
+            })
+            .map(|(name, device)| {
+                let provider = ShellyProvider::from_device(device, POWER_TIMEOUT)
+                    .map(|provider| {
+                        Arc::new(CachedPowerProvider {
+                            provider,
+                            observations: Mutex::new(PowerObservationCache::default()),
+                        })
+                    })
+                    .map_err(|error| error.to_string());
+                (name.clone(), provider)
+            })
+            .collect();
+        Self { providers }
+    }
 }
 
 impl TerminalSession {
@@ -184,6 +265,7 @@ pub fn run(config: Config) -> io::Result<()> {
         return Err(io::Error::other("the TUI requires an interactive terminal"));
     }
     let control_masters = Arc::new(ControlMasterPool::system());
+    let power_providers = Arc::new(PowerProviderPool::new(&config));
     let mut jobs = BackgroundJobs::new();
     let mut terminal = TerminalSession::enter()?;
     let mut dashboard = Dashboard::from_config(&config);
@@ -207,6 +289,7 @@ pub fn run(config: Config) -> io::Result<()> {
                 &due,
                 &sender,
                 Arc::clone(&control_masters),
+                Arc::clone(&power_providers),
                 &mut jobs,
                 &mut polls_in_flight,
             );
@@ -261,6 +344,7 @@ fn spawn_due_polls(
     due: &[PollKind],
     sender: &Sender<RuntimeMessage>,
     control_masters: Arc<ControlMasterPool>,
+    power_providers: Arc<PowerProviderPool>,
     jobs: &mut BackgroundJobs,
     polls_in_flight: &mut HashSet<String>,
 ) {
@@ -274,8 +358,16 @@ fn spawn_due_polls(
         let due = due.to_vec();
         let sender = sender.clone();
         let control_masters = Arc::clone(&control_masters);
+        let power_providers = Arc::clone(&power_providers);
         jobs.spawn(move |cancellation| {
-            let sample = poll_device(&config, &name, &due, &cancellation, &control_masters);
+            let sample = poll_device(
+                &config,
+                &name,
+                &due,
+                &cancellation,
+                &control_masters,
+                &power_providers,
+            );
             let _ = sender.send(RuntimeMessage::Poll(sample));
         });
     }
@@ -287,9 +379,9 @@ fn poll_device(
     due: &[PollKind],
     cancellation: &CancellationToken,
     control_masters: &ControlMasterPool,
+    power_providers: &PowerProviderPool,
 ) -> DashboardSample {
-    let device = &config.devices()[name];
-    let power = poll_power(device);
+    let power = poll_power(power_providers, name);
     let sample = DashboardSample {
         device: name.to_owned(),
         state: DeviceState::Unknown,
@@ -573,22 +665,26 @@ fn unreachable_sample(
     sample
 }
 
-fn poll_power(
-    device: &crate::domain::Device,
-) -> Option<(OutletState, Option<f64>, Option<String>)> {
-    if !matches!(device.power, Some(ConfiguredPowerProvider::Shelly { .. })) {
-        return None;
-    }
-    match ShellyProvider::<ShellyHttpClient>::from_device(device, POWER_TIMEOUT) {
-        Ok(provider) => {
-            let status = provider.status();
-            let watts = match status.telemetry.power_watts {
-                PowerMetric::Value(value) => Some(value),
-                PowerMetric::Unsupported | PowerMetric::Unknown => None,
-            };
-            Some((status.outlet, watts, status.error))
-        }
-        Err(error) => Some((OutletState::Unknown, None, Some(error.to_string()))),
+fn poll_power(providers: &PowerProviderPool, device_name: &str) -> Option<PowerObservation> {
+    match providers.providers.get(device_name)? {
+        Ok(provider) => Some(
+            provider
+                .observations
+                .lock()
+                .map_err(|_| "Shelly observation lock poisoned".to_owned())
+                .map(|mut observations| {
+                    observations.observe(Instant::now(), || {
+                        let status = provider.provider.status();
+                        let watts = match status.telemetry.power_watts {
+                            PowerMetric::Value(value) => Some(value),
+                            PowerMetric::Unsupported | PowerMetric::Unknown => None,
+                        };
+                        (status.outlet, watts, status.error)
+                    })
+                })
+                .unwrap_or_else(|error| (OutletState::Unknown, None, Some(error))),
+        ),
+        Err(error) => Some((OutletState::Unknown, None, Some(error.clone()))),
     }
 }
 
@@ -976,6 +1072,7 @@ mod tests {
         collections::VecDeque,
         path::PathBuf,
         sync::{Arc, Mutex},
+        time::{Duration, Instant},
     };
 
     use crate::{
@@ -985,9 +1082,9 @@ mod tests {
     };
 
     use super::{
-        CancellationToken, Config, ControlMasterPool, DeviceState, OpenSsh, RuntimeMessage,
-        SSH_STARTUP_TIMEOUT, control_path, model_names, mpsc, poll_device, send_operation_failures,
-        unreachable_sample,
+        CancellationToken, Config, ControlMasterPool, DeviceState, OpenSsh, PowerObservationCache,
+        PowerProviderPool, RuntimeMessage, SSH_STARTUP_TIMEOUT, control_path, model_names, mpsc,
+        poll_device, send_operation_failures, unreachable_sample,
     };
 
     struct FakeProcess {
@@ -1022,6 +1119,78 @@ mod tests {
     }
 
     #[test]
+    fn power_provider_pool_retains_provider_across_polls() {
+        let config = Config::from_yaml(
+            "devices:\n  alpha:\n    ssh: alpha\n    power:\n      type: shelly\n      host: 127.0.0.1\n",
+        )
+        .unwrap();
+        let pool = PowerProviderPool::new(&config);
+        let first = pool.providers["alpha"].as_ref().unwrap();
+        let second = pool.providers["alpha"].as_ref().unwrap();
+
+        assert!(Arc::ptr_eq(first, second));
+    }
+
+    #[test]
+    fn power_observations_are_rate_limited_and_keep_last_good_value_on_429() {
+        let started = Instant::now();
+        let good = (OutletState::On, Some(42.0), None);
+        let rate_limited = (
+            OutletState::Unknown,
+            None,
+            Some("Shelly request returned HTTP 429".to_owned()),
+        );
+        let mut cache = PowerObservationCache::default();
+
+        assert_eq!(cache.observe(started, || good.clone()), good);
+        assert_eq!(
+            cache.observe(started + Duration::from_secs(9), || {
+                panic!("power should remain cached")
+            }),
+            good
+        );
+        assert_eq!(
+            cache.observe(started + Duration::from_secs(10), || rate_limited),
+            good
+        );
+        assert_eq!(
+            cache.observe(started + Duration::from_secs(19), || {
+                panic!("429 backoff should remain cached")
+            }),
+            good
+        );
+    }
+
+    #[test]
+    fn transient_startup_rate_limits_are_hidden_but_persistent_ones_are_reported() {
+        let started = Instant::now();
+        let rate_limited = || {
+            (
+                OutletState::Unknown,
+                None,
+                Some("Shelly request returned HTTP 429".to_owned()),
+            )
+        };
+        let mut cache = PowerObservationCache::default();
+
+        assert_eq!(
+            cache.observe(started, rate_limited),
+            (OutletState::Unknown, None, None)
+        );
+        assert_eq!(
+            cache.observe(started + Duration::from_secs(10), rate_limited),
+            (OutletState::Unknown, None, None)
+        );
+        assert_eq!(
+            cache
+                .observe(started + Duration::from_secs(20), rate_limited)
+                .2
+                .as_deref(),
+            Some("Shelly request returned HTTP 429")
+        );
+    }
+
+    #[test]
     fn control_socket_names_are_short_and_device_specific() {
         let first = control_path(&"a".repeat(63));
         let second = control_path(&format!("{}b", "a".repeat(62)));
@@ -1039,9 +1208,11 @@ mod tests {
         let ssh = OpenSsh::discover(process.clone()).unwrap();
         {
             let pool = ControlMasterPool::new(Ok(ssh));
+            let config = config();
+            let power = PowerProviderPool::new(&config);
             let cancellation = CancellationToken::new();
-            poll_device(&config(), "alpha", &[], &cancellation, &pool);
-            poll_device(&config(), "alpha", &[], &cancellation, &pool);
+            poll_device(&config, "alpha", &[], &cancellation, &pool, &power);
+            poll_device(&config, "alpha", &[], &cancellation, &pool, &power);
         }
 
         let requests = process.requests.lock().unwrap();
@@ -1082,10 +1253,12 @@ mod tests {
             requests: Mutex::new(Vec::new()),
         });
         let pool = ControlMasterPool::new(Ok(OpenSsh::discover(process.clone()).unwrap()));
+        let config = config();
+        let power = PowerProviderPool::new(&config);
         let cancellation = CancellationToken::new();
 
-        let first = poll_device(&config(), "alpha", &[], &cancellation, &pool);
-        let second = poll_device(&config(), "alpha", &[], &cancellation, &pool);
+        let first = poll_device(&config, "alpha", &[], &cancellation, &pool, &power);
+        let second = poll_device(&config, "alpha", &[], &cancellation, &pool, &power);
 
         assert_eq!(first.state, DeviceState::Unreachable);
         assert_eq!(second.state, DeviceState::Running);

@@ -2,7 +2,7 @@
 
 use std::{fmt, sync::Mutex, time::Duration};
 
-use diqwest::blocking::WithDigestAuth;
+use diqwest::{DigestAuthSession, blocking::WithDigestAuth, session::DigestAuthCredentials};
 use serde::Deserialize;
 use url::Url;
 
@@ -125,16 +125,42 @@ pub trait HttpClient: Send + Sync {
     fn execute(&self, request: HttpRequest<'_>) -> Result<HttpResponse, HttpError>;
 }
 
-#[derive(Debug, Default)]
 pub struct ReqwestHttpClient {
     client: reqwest::blocking::Client,
+    auth: Mutex<Option<AuthSession>>,
+}
+
+enum AuthSession {
+    Basic,
+    Digest(DigestAuthSession),
+}
+
+impl fmt::Debug for ReqwestHttpClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReqwestHttpClient")
+            .field("auth", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for ReqwestHttpClient {
+    fn default() -> Self {
+        Self {
+            client: reqwest::blocking::Client::new(),
+            auth: Mutex::new(None),
+        }
+    }
 }
 
 impl ReqwestHttpClient {
     pub fn new() -> Result<Self, HttpError> {
         reqwest::blocking::Client::builder()
             .build()
-            .map(|client| Self { client })
+            .map(|client| Self {
+                client,
+                auth: Mutex::new(None),
+            })
             .map_err(|error| HttpError::Transport(error.to_string()))
     }
 
@@ -156,6 +182,26 @@ impl HttpClient for ReqwestHttpClient {
                 .map_err(map_reqwest_error)
                 .and_then(Self::response);
         };
+        let mut auth = self
+            .auth
+            .lock()
+            .map_err(|_| HttpError::Transport("Shelly authentication lock poisoned".to_owned()))?;
+        match auth.as_ref() {
+            Some(AuthSession::Basic) => {
+                return builder
+                    .basic_auth(credentials.username(), Some(credentials.password()))
+                    .send()
+                    .map_err(map_reqwest_error)
+                    .and_then(Self::response);
+            }
+            Some(AuthSession::Digest(session)) => {
+                return builder
+                    .send_digest_auth(session)
+                    .map_err(|error| HttpError::Transport(error.to_string()))
+                    .and_then(Self::response);
+            }
+            None => {}
+        }
         let first = builder
             .try_clone()
             .ok_or_else(|| HttpError::Transport("could not clone Shelly request".to_owned()))?
@@ -173,14 +219,26 @@ impl HttpClient for ReqwestHttpClient {
             .get(..6)
             .is_some_and(|scheme| scheme.eq_ignore_ascii_case("digest"))
         {
-            builder
-                .send_digest_auth((credentials.username(), credentials.password()))
-                .map_err(|error| HttpError::Transport(error.to_string()))?
+            let session = DigestAuthSession::new(credentials.username(), credentials.password());
+            let host = Url::parse(request.url())
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .ok_or_else(|| HttpError::Transport("Shelly URL has no host".to_owned()))?;
+            (&session)
+                .store_context(&host, challenge)
+                .map_err(|error| HttpError::Transport(error.to_string()))?;
+            let response = builder
+                .send_digest_auth(&session)
+                .map_err(|error| HttpError::Transport(error.to_string()))?;
+            *auth = Some(AuthSession::Digest(session));
+            response
         } else {
-            builder
+            let response = builder
                 .basic_auth(credentials.username(), Some(credentials.password()))
                 .send()
-                .map_err(map_reqwest_error)?
+                .map_err(map_reqwest_error)?;
+            *auth = Some(AuthSession::Basic);
+            response
         };
         Self::response(response)
     }
@@ -544,4 +602,100 @@ struct RpcEnergy {
 struct RpcSetResponse {
     #[allow(dead_code)]
     was_on: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        thread,
+    };
+
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn digest_challenge_is_reused_for_subsequent_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let authenticated_count = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = {
+            let request_count = Arc::clone(&request_count);
+            let authenticated_count = Arc::clone(&authenticated_count);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut request = [0; 4096];
+                    let length = stream.read(&mut request).unwrap();
+                    let request = String::from_utf8_lossy(&request[..length]);
+                    request_count.fetch_add(1, Ordering::Relaxed);
+                    let authenticated = request.lines().any(|line| {
+                        line.to_ascii_lowercase()
+                            .starts_with("authorization: digest")
+                    });
+                    let response = if authenticated {
+                        authenticated_count.fetch_add(1, Ordering::Relaxed);
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                    } else {
+                        "HTTP/1.1 401 Unauthorized\r\n\
+                         WWW-Authenticate: Digest realm=\"shelly\", nonce=\"abc\", \
+                         algorithm=MD5, qop=\"auth\"\r\n\
+                         Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    };
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            })
+        };
+        let config = Config::from_yaml(
+            r#"
+devices:
+  alpha:
+    ssh: alpha
+    power:
+      type: shelly
+      host: shelly.local
+      auth:
+        username: admin
+        password: "${env:SHELLY_PASSWORD}"
+"#,
+        )
+        .unwrap();
+        let auth = match &config.devices()["alpha"].power {
+            Some(ConfiguredPowerProvider::Shelly {
+                auth: Some(auth), ..
+            }) => auth,
+            _ => panic!("expected Shelly auth"),
+        };
+        let credentials = ShellyCredentials::resolve(auth, |_| Some("secret".to_owned())).unwrap();
+        let client = ReqwestHttpClient::new().unwrap();
+
+        for path in ["shelly", "rpc/Switch.GetStatus?id=0"] {
+            let response = client
+                .execute(HttpRequest::new(
+                    format!("http://{address}/{path}"),
+                    Duration::from_secs(2),
+                    Some(&credentials),
+                ))
+                .unwrap();
+            assert_eq!(response.status, 200);
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+        assert_eq!(request_count.load(Ordering::Relaxed), 3);
+        assert_eq!(authenticated_count.load(Ordering::Relaxed), 2);
+    }
 }
