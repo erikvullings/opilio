@@ -179,10 +179,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-CI runs these checks on Linux, macOS, and Windows.
+CI runs these checks and builds optimized release binaries on Linux, macOS,
+and Windows.
 
 <details>
-<summary>Implementation status — 24 / 26 tasks done</summary>
+<summary>Implementation status — 25 / 27 tasks done</summary>
 
 | Task | Status | Depends on | Outcome |
 |---|---|---|---|
@@ -212,5 +213,6 @@ CI runs these checks on Linux, macOS, and Windows.
 | [0024 Show RAM GiB in graph](TASKS/0024-show-ram-gib-in-graph.md) | done | 0017, 0023 | Current absolute RAM usage in history title |
 | [0025 Fix Windows TUI build](TASKS/0025-fix-windows-tui-build.md) | in-progress | 0022 | Restore Windows compilation and CI release builds |
 | [0026 Publish Windows-ready release](TASKS/0026-publish-windows-ready-release.md) | open | 0025 | Publish verified cross-platform archives |
+| [0027 Keep selected status readable](TASKS/0027-keep-selected-status-readable.md) | done | 0023 | Restore status contrast on selected TUI row |
 
 </details>
