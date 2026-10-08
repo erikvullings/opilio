@@ -574,7 +574,7 @@ fn poll_remote(
         &device.ssh,
         &RemoteInvocation::command(":", &device.shell),
         ExecutionOptions {
-            timeout: Some(Duration::from_secs(5)),
+            timeout: Some(SSH_STARTUP_TIMEOUT),
             cancellation: cancellation.clone(),
             ..ExecutionOptions::default()
         },
