@@ -182,7 +182,7 @@ cargo fmt --check
 CI runs these checks on Linux, macOS, and Windows.
 
 <details>
-<summary>Implementation status — 24 / 24 tasks done</summary>
+<summary>Implementation status — 24 / 26 tasks done</summary>
 
 | Task | Status | Depends on | Outcome |
 |---|---|---|---|
@@ -210,5 +210,7 @@ CI runs these checks on Linux, macOS, and Windows.
 | [0022 Reduce Shelly auth requests](TASKS/0022-reduce-shelly-auth-requests.md) | done | 0006, 0012 | Cache digest auth and prevent HTTP 429 |
 | [0023 Clarify TUI scale and focus](TASKS/0023-clarify-tui-scale-and-focus.md) | done | 0017, 0018 | Truthful percentage scale and visible panel focus |
 | [0024 Show RAM GiB in graph](TASKS/0024-show-ram-gib-in-graph.md) | done | 0017, 0023 | Current absolute RAM usage in history title |
+| [0025 Fix Windows TUI build](TASKS/0025-fix-windows-tui-build.md) | in-progress | 0022 | Restore Windows compilation and CI release builds |
+| [0026 Publish Windows-ready release](TASKS/0026-publish-windows-ready-release.md) | open | 0025 | Publish verified cross-platform archives |
 
 </details>
