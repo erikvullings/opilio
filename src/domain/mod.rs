@@ -198,7 +198,7 @@ impl FromStr for MacAddress {
                 "invalid Wake-on-LAN MAC address `{value}`: expected six two-digit hexadecimal octets for a unicast interface"
             )
         };
-        let separator = value.as_bytes().get(2).copied().ok_or_else(&invalid)?;
+        let separator = value.as_bytes().get(2).copied().ok_or_else(invalid)?;
         if !matches!(separator, b':' | b'-') {
             return Err(invalid());
         }
