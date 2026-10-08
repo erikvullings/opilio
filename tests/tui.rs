@@ -1,11 +1,13 @@
 use std::time::{Duration, Instant};
 
+use ratatui::{Terminal, backend::TestBackend, style::Color};
+
 use opilio::{
     config::Config,
     service::ServiceState,
     tui::{
         Dashboard, DashboardSample, DashboardService, DeviceState, Effect, Event, Key,
-        MetricSample, Operation, Overlay, PollKind, PollPolicy, render_to_string,
+        MetricSample, Operation, Overlay, PollKind, PollPolicy, render, render_to_string,
     },
 };
 
@@ -385,6 +387,36 @@ fn focused_panel_is_explicit_and_moves_with_horizontal_navigation() {
     let scopes_focused = render_to_string(&dashboard, 120, 30);
     assert!(scopes_focused.contains("Sites / Groups [focus]"));
     assert!(!scopes_focused.contains("Devices [focus]"));
+}
+
+#[test]
+fn selected_device_status_uses_readable_cursor_foreground() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Running,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: None,
+        services: None,
+        error: None,
+    }));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| render(frame, &dashboard)).unwrap();
+    let row = (0..120)
+        .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
+        .collect::<String>();
+    let x = row.find("running").unwrap() as u16;
+    let selected = &terminal.backend().buffer()[(x, 1)];
+    assert_eq!(selected.fg, Color::Black);
+    assert_eq!(selected.bg, Color::Cyan);
+
+    dashboard.update(Event::Key(Key::Left));
+    terminal.draw(|frame| render(frame, &dashboard)).unwrap();
+    assert_eq!(terminal.backend().buffer()[(x, 1)].fg, Color::Green);
 }
 
 #[test]

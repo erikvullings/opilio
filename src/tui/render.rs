@@ -68,7 +68,11 @@ fn render_devices(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
             .busy
             .as_deref()
             .map_or(String::new(), |operation| format!(" [{operation}…]"));
-        let style = state_style(device.state);
+        let style = if selected && focused {
+            selection_style(true)
+        } else {
+            state_style(device.state)
+        };
         ListItem::new(Line::from(vec![
             Span::raw(format!("{marker} {name:<16} ")),
             Span::styled(device.state.label(), style),
