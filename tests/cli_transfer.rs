@@ -112,8 +112,9 @@ fn transfer_cli_emits_human_and_versioned_json_reports() {
         "Host alpha\n  HostName alpha.example\n",
     )
     .unwrap();
-    let previous_home = std::env::var_os("HOME");
-    unsafe { std::env::set_var("HOME", &root) };
+    let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let previous_home = std::env::var_os(home_variable);
+    unsafe { std::env::set_var(home_variable, &root) };
 
     let export = Cli::try_parse_from([
         "opilio",
@@ -174,7 +175,7 @@ fn transfer_cli_emits_human_and_versioned_json_reports() {
     }
 
     match previous_home {
-        Some(value) => unsafe { std::env::set_var("HOME", value) },
-        None => unsafe { std::env::remove_var("HOME") },
+        Some(value) => unsafe { std::env::set_var(home_variable, value) },
+        None => unsafe { std::env::remove_var(home_variable) },
     }
 }

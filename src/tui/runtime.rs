@@ -3,7 +3,7 @@ use std::{
     io::{self, IsTerminal, Stdout},
     num::NonZeroUsize,
     sync::{
-        Arc,
+        Arc, Mutex,
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -15,7 +15,6 @@ use std::{
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
-    sync::Mutex,
 };
 
 use crossterm::{
@@ -575,7 +574,7 @@ fn poll_remote(
         &device.ssh,
         &RemoteInvocation::command(":", &device.shell),
         ExecutionOptions {
-            timeout: Some(Duration::from_secs(5)),
+            timeout: Some(SSH_STARTUP_TIMEOUT),
             cancellation: cancellation.clone(),
             ..ExecutionOptions::default()
         },
