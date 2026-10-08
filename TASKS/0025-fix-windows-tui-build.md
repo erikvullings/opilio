@@ -28,6 +28,8 @@ A Windows source build fails with E0425/E0433 at `src/tui/runtime.rs` because
 - [x] Identified the platform-guard mismatch from the Windows compiler output.
 - [x] Correct the import and validate locally.
 - [x] Address Windows-only dead-code and newer CI Clippy diagnostics.
+- [x] Correct the transfer CLI test fixture to override `USERPROFILE` on
+  Windows instead of `HOME`, matching production path resolution.
 - [ ] Verify the Windows CI release build.
 
 ## Validation
