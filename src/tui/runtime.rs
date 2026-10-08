@@ -3,7 +3,7 @@ use std::{
     io::{self, IsTerminal, Stdout},
     num::NonZeroUsize,
     sync::{
-        Arc,
+        Arc, Mutex,
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -15,7 +15,6 @@ use std::{
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
-    sync::Mutex,
 };
 
 use crossterm::{
