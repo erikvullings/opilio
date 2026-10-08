@@ -31,3 +31,7 @@ Use exactly: `open`, `in-progress`, `blocked`, `done`.
 ## Engineering approach
 
 Prefer vertical/tracer-bullet tasks that leave a demonstrable capability rather than layer-only work. Keep CLI, TUI, scheduler, and tests behind shared library APIs. Test stable seams. Never log or export resolved secrets. Treat JSON output as a public compatibility surface.
+
+## GitHub CLI
+
+For this repository's GitHub operations on this controller, use the `erikvullings` keychain login by running `gh` without the corporate `GH_TOKEN` environment override (for example, `env -u GH_TOKEN gh ...`). Never store or print a token.

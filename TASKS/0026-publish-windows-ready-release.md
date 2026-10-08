@@ -1,6 +1,6 @@
 # 0026 — Publish Windows-ready release
 
-**Status:** open
+**Status:** in-progress
 **Depends on:** 0025
 **Spec:** `docs/OPILIO_V1_SPEC.md`
 
@@ -22,12 +22,13 @@ tagging the fix.
 
 ## Progress
 
-- [ ] Verify CI for the Windows fix.
+- [x] Verify CI for the Windows fix.
 - [ ] Publish and verify the GitHub release and its four archives.
 
 ## Validation
 
-Pending.
+- [CI run 37811993774](https://github.com/erikvullings/opilio/actions/runs/37811993774)
+  passed release builds and full checks on Linux, macOS, and Windows.
 
 ## Blockers / decisions needed
 
