@@ -268,6 +268,10 @@ impl Dashboard {
                 operation,
                 result,
             } => {
+                let message = match &result {
+                    Ok(_) => format!("{operation} finished for {device}"),
+                    Err(error) => format!("{operation} failed for {device}: {error}"),
+                };
                 if let Some(item) = self.devices.get_mut(&device) {
                     item.busy = None;
                     match result {
@@ -281,7 +285,7 @@ impl Dashboard {
                         }
                     }
                 }
-                self.message = Some(format!("{operation} finished for {device}"));
+                self.message = Some(message);
                 Vec::new()
             }
             Event::Key(key) => self.update_key(key),

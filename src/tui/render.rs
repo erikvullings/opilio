@@ -132,7 +132,25 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
     let show_power = device.watts.is_some() || !device.watts_history.is_empty();
     let details = detail_lines(device, show_power);
     let detail_height = details.len().min(10) as u16;
+    let mut messages = Vec::new();
+    if let Some(error) = &device.recent_failure {
+        messages.push(
+            Line::from(format!("Recent failure: {error}")).style(Style::default().fg(Color::Red)),
+        );
+    }
+    if let Some(error) = &device.status_detail {
+        messages.push(
+            Line::from(format!("Status detail: {error}")).style(Style::default().fg(Color::Yellow)),
+        );
+    }
+    let error_height = messages
+        .iter()
+        .map(|line| line.width().div_ceil(inner.width.max(1) as usize) + 1)
+        .sum::<usize>()
+        .min(inner.height as usize) as u16;
+    let errors = Paragraph::new(messages).wrap(Wrap { trim: true });
     let mut constraints = vec![
+        Constraint::Length(error_height),
         Constraint::Length(detail_height),
         Constraint::Length(chart_height),
         Constraint::Length(1),
@@ -146,7 +164,8 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(inner);
-    frame.render_widget(Paragraph::new(details), chunks[0]);
+    frame.render_widget(errors, chunks[0]);
+    frame.render_widget(Paragraph::new(details), chunks[1]);
     let ram_used = device
         .ram_used_bytes
         .map(|bytes| format!("{:.1} GiB", gibibytes(bytes)));
@@ -155,7 +174,7 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         "RAM used",
         "%",
         &device.ram_history,
-        chunks[1],
+        chunks[2],
         ram_used.as_deref(),
         Some((0.0, 100.0)),
     );
@@ -164,39 +183,19 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         "GPU busy",
         "%",
         &device.gpu_history,
-        chunks[3],
+        chunks[4],
         None,
         Some((0.0, 100.0)),
     );
-    let error_chunk = if show_power {
+    if show_power {
         metric_history(
             frame,
             "Power draw",
             " W",
             &device.watts_history,
-            chunks[4],
+            chunks[5],
             None,
             None,
-        );
-        5
-    } else {
-        4
-    };
-    let mut messages = Vec::new();
-    if let Some(error) = &device.recent_failure {
-        messages.push(
-            Line::from(format!("Recent failure: {error}")).style(Style::default().fg(Color::Red)),
-        );
-    }
-    if let Some(error) = &device.status_detail {
-        messages.push(
-            Line::from(format!("Status detail: {error}")).style(Style::default().fg(Color::Yellow)),
-        );
-    }
-    if !messages.is_empty() {
-        frame.render_widget(
-            Paragraph::new(messages).wrap(Wrap { trim: true }),
-            chunks[error_chunk],
         );
     }
 }

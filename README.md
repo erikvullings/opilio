@@ -184,7 +184,7 @@ CI runs these checks and builds optimized release binaries on Linux, macOS,
 and Windows.
 
 <details>
-<summary>Implementation status — 27 / 27 tasks done</summary>
+<summary>Implementation status — 28 / 28 tasks done</summary>
 
 | Task | Status | Depends on | Outcome |
 |---|---|---|---|
@@ -215,5 +215,6 @@ and Windows.
 | [0025 Fix Windows TUI build](TASKS/0025-fix-windows-tui-build.md) | done | 0022 | Restore Windows compilation and CI release builds |
 | [0026 Publish Windows-ready release](TASKS/0026-publish-windows-ready-release.md) | done | 0025 | Publish verified cross-platform archives |
 | [0027 Keep selected status readable](TASKS/0027-keep-selected-status-readable.md) | done | 0023 | Restore status contrast on selected TUI row |
+| [0028 Show missing secrets in TUI](TASKS/0028-show-missing-secrets-in-tui.md) | done | 0021, 0022 | Make missing environment secrets visible in device details |
 
 </details>

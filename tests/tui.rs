@@ -223,6 +223,38 @@ fn polling_error_is_labeled_as_status_detail_not_operation_failure() {
 }
 
 #[test]
+fn missing_secret_failure_remains_visible_with_unreachable_status_on_compact_terminal() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::OperationFinished {
+        device: "alpha".into(),
+        operation: "on".into(),
+        result: Err(
+            "environment variable `OPILIO_SHELLY_SPARK_301B_PASSWORD` referenced by a secret is not set"
+                .into(),
+        ),
+    });
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Unreachable,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: None,
+        services: None,
+        error: Some("SSH connection timed out".into()),
+    }));
+
+    let rendered = render_to_string(&dashboard, 100, 18);
+    assert!(
+        rendered.contains("OPILIO_SHELLY_SPARK_301B_PASSWORD"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Recent failure:"), "{rendered}");
+    assert!(rendered.contains("on failed for alpha:"), "{rendered}");
+}
+
+#[test]
 fn adaptive_polling_backs_off_site_loss_and_recovers() {
     let start = Instant::now();
     let mut policy = PollPolicy::new(start);

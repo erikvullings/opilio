@@ -565,8 +565,8 @@ fn poll_remote(
     let ssh = match OpenSsh::system() {
         Ok(ssh) => ssh,
         Err(error) => {
+            sample = unreachable_sample(sample, None, error.to_string());
             sample.state = DeviceState::Error;
-            sample.error = Some(error.to_string());
             return sample;
         }
     };
@@ -659,7 +659,10 @@ fn unreachable_sample(
         sample.error.clone_from(power_error);
     } else {
         sample.state = DeviceState::Unreachable;
-        sample.error = Some(error);
+        sample.error = Some(match sample.error.take() {
+            Some(power_error) => format!("Shelly: {power_error}; SSH: {error}"),
+            None => error,
+        });
     }
     sample
 }
@@ -1083,7 +1086,7 @@ mod tests {
     use super::{
         CancellationToken, Config, ControlMasterPool, DeviceState, OpenSsh, PowerObservationCache,
         PowerProviderPool, RuntimeMessage, SSH_STARTUP_TIMEOUT, control_path, model_names, mpsc,
-        poll_device, send_operation_failures, unreachable_sample,
+        poll_device, poll_power, send_operation_failures, unreachable_sample,
     };
 
     struct FakeProcess {
@@ -1296,6 +1299,36 @@ mod tests {
 
         assert_eq!(sample.state, DeviceState::Off);
         assert_eq!(sample.error, None);
+    }
+
+    #[test]
+    fn missing_shelly_secret_survives_ssh_failure() {
+        let config = Config::from_yaml(
+            "devices:\n  alpha:\n    ssh: alpha\n    power:\n      type: shelly\n      host: 127.0.0.1\n      auth:\n        password: \"${env:OPILIO_TEST_MISSING_SHELLY_SECRET_0028}\"\n",
+        )
+        .unwrap();
+        let pool = PowerProviderPool::new(&config);
+        let power = poll_power(&pool, "alpha").unwrap();
+        let sample = unreachable_sample(
+            DashboardSample {
+                device: "alpha".into(),
+                state: DeviceState::Unknown,
+                ram_percent: None,
+                ram_used_bytes: None,
+                ram_total_bytes: None,
+                gpu_percent: None,
+                watts: None,
+                services: None,
+                error: power.2.clone(),
+            },
+            Some(&power),
+            "SSH connection timed out".into(),
+        );
+
+        assert_eq!(sample.state, DeviceState::Unreachable);
+        let error = sample.error.unwrap();
+        assert!(error.contains("OPILIO_TEST_MISSING_SHELLY_SECRET_0028"));
+        assert!(error.contains("SSH connection timed out"));
     }
 
     #[test]
