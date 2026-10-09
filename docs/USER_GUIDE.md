@@ -110,6 +110,11 @@ maximum values and dynamically scale small changes instead of rounding them
 away. Power history remains unavailable until a Shelly or another metering
 provider supplies watt readings.
 
+The selected device's TUI details show operation failures and polling errors
+above the graphs. If a configured password environment variable is missing,
+the error names the variable (never its value); set it in the environment
+that launches the TUI and restart the TUI.
+
 Multiple services can be attached to one device and are shown independently.
 For an OpenAI-compatible SGLang or LiteLLM model endpoint, extract the complete
 model array to display every advertised model:
