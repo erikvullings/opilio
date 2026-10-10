@@ -1,9 +1,11 @@
 //! Safety planning and lifecycle execution shared by every frontend.
 
 use std::{
+    collections::HashMap,
     fmt,
     io::{self, Write},
     num::NonZeroUsize,
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
     time::Instant,
@@ -258,36 +260,86 @@ pub trait LifecycleExecutor: Sync {
     ) -> Result<(), String>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SystemLifecycleExecutor {
     ssh: Option<OpenSsh>,
+    power: Arc<Mutex<HashMap<String, Arc<dyn PowerProvider>>>>,
+}
+
+impl fmt::Debug for SystemLifecycleExecutor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SystemLifecycleExecutor")
+            .finish_non_exhaustive()
+    }
 }
 
 impl SystemLifecycleExecutor {
     pub fn new(ssh: OpenSsh) -> Self {
-        Self { ssh: Some(ssh) }
+        Self {
+            ssh: Some(ssh),
+            power: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    pub const fn system() -> Self {
-        Self { ssh: None }
+    pub fn system() -> Self {
+        Self {
+            ssh: None,
+            power: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    fn power_provider(device: &Device) -> Result<Box<dyn PowerProvider>, LifecycleSystemError> {
+    fn power_provider(device: &Device) -> Result<Arc<dyn PowerProvider>, LifecycleSystemError> {
         match &device.power {
             Some(ConfiguredPowerProvider::Shelly { .. }) => {
                 ShellyProvider::<ReqwestHttpClient>::from_device(device, SHELLY_TIMEOUT)
-                    .map(|provider| Box::new(provider) as Box<dyn PowerProvider>)
+                    .map(|provider| Arc::new(provider) as Arc<dyn PowerProvider>)
                     .map_err(|error| LifecycleSystemError(error.to_string()))
             }
             Some(ConfiguredPowerProvider::Wol { .. }) => {
                 WolProvider::<SystemUdpSender>::from_device(device)
-                    .map(|provider| Box::new(provider) as Box<dyn PowerProvider>)
+                    .map(|provider| Arc::new(provider) as Arc<dyn PowerProvider>)
                     .map_err(|error| LifecycleSystemError(error.to_string()))
             }
             None => Err(LifecycleSystemError(
                 "device has no configured power provider".to_owned(),
             )),
         }
+    }
+
+    fn power_provider_for(
+        &self,
+        device_name: &str,
+        device: &Device,
+    ) -> Result<Arc<dyn PowerProvider>, LifecycleSystemError> {
+        let mut providers = self
+            .power
+            .lock()
+            .map_err(|_| LifecycleSystemError("power provider lock poisoned".to_owned()))?;
+        if let Some(provider) = providers.get(device_name) {
+            return Ok(Arc::clone(provider));
+        }
+        let provider = Self::power_provider(device)?;
+        providers.insert(device_name.to_owned(), Arc::clone(&provider));
+        Ok(provider)
+    }
+
+    pub fn prepare_power(&self, device_name: &str, device: &Device) -> Result<(), String> {
+        self.power_provider_for(device_name, device)
+            .map(|_| ())
+            .map_err(|error| error.0)
+    }
+
+    pub fn reuse_power_provider(
+        &self,
+        device_name: &str,
+        provider: Arc<dyn PowerProvider>,
+    ) -> Result<(), String> {
+        self.power
+            .lock()
+            .map_err(|_| "power provider lock poisoned".to_owned())?
+            .insert(device_name.to_owned(), provider);
+        Ok(())
     }
 
     fn remote(
@@ -384,11 +436,14 @@ impl LifecycleExecutor for SystemLifecycleExecutor {
         timeout: Duration,
     ) -> Result<(), String> {
         let result = match step {
-            PlannedStep::RequestPowerOn => Self::power_provider(device).and_then(|provider| {
-                provider
-                    .request_on()
-                    .map_err(|error| LifecycleSystemError(error.to_string()))
-            }),
+            PlannedStep::RequestPowerOn => {
+                self.power_provider_for(_device_name, device)
+                    .and_then(|provider| {
+                        provider
+                            .request_on()
+                            .map_err(|error| LifecycleSystemError(error.to_string()))
+                    })
+            }
             PlannedStep::WaitForSsh => self.wait_for_ssh(device, timeout, true),
             PlannedStep::GracefulShutdown => self.require_remote_success(
                 device,
@@ -402,15 +457,187 @@ impl LifecycleExecutor for SystemLifecycleExecutor {
             PlannedStep::Reboot => {
                 self.require_remote_success(device, "sudo shutdown -r now", SSH_PROBE_TIMEOUT)
             }
-            PlannedStep::CutPhysicalPower => Self::power_provider(device).and_then(|provider| {
-                provider
-                    .set_outlet(OutletCommand::Off)
-                    .map(|_| ())
-                    .map_err(|error| LifecycleSystemError(error.to_string()))
-            }),
+            PlannedStep::CutPhysicalPower => self
+                .power_provider_for(_device_name, device)
+                .and_then(|provider| {
+                    provider
+                        .set_outlet(OutletCommand::Off)
+                        .map(|_| ())
+                        .map_err(|error| LifecycleSystemError(error.to_string()))
+                }),
         };
         result.map_err(|error| error.0)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryStage {
+    GracefulShutdown,
+    WaitForShutdown,
+    CutPower,
+    HoldPower,
+    RestorePower,
+    WaitForShelly,
+    RetryPowerOn,
+}
+
+impl RecoveryStage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::GracefulShutdown => "graceful shutdown",
+            Self::WaitForShutdown => "wait for shutdown",
+            Self::CutPower => "cut physical power",
+            Self::HoldPower => "hold power off for 10s",
+            Self::RestorePower => "restore physical power",
+            Self::WaitForShelly => "Shelly rate-limited; retry in 10s",
+            Self::RetryPowerOn => "retry restoring physical power",
+        }
+    }
+
+    pub const fn history_name(self) -> &'static str {
+        match self {
+            Self::GracefulShutdown => "reboot-graceful-shutdown",
+            Self::WaitForShutdown => "reboot-wait-for-shutdown",
+            Self::CutPower => "reboot-cut-power",
+            Self::HoldPower => "reboot-hold-power",
+            Self::RestorePower => "reboot-restore-power",
+            Self::WaitForShelly => "reboot-wait-for-shelly",
+            Self::RetryPowerOn => "reboot-retry-power-on",
+        }
+    }
+
+    pub const fn is_forced(self) -> bool {
+        matches!(
+            self,
+            Self::CutPower
+                | Self::HoldPower
+                | Self::RestorePower
+                | Self::WaitForShelly
+                | Self::RetryPowerOn
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryEvent {
+    Started(RecoveryStage),
+    Succeeded(RecoveryStage),
+    Failed(RecoveryStage, String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryOutcome {
+    pub graceful_error: Option<String>,
+}
+
+pub fn execute_recovery_cycle(
+    device_name: &str,
+    device: &Device,
+    executor: &dyn LifecycleExecutor,
+    mut hold: impl FnMut(Duration),
+    mut progress: impl FnMut(RecoveryEvent),
+) -> Result<RecoveryOutcome, String> {
+    let capabilities = configured_capabilities(device);
+    if !capabilities.can_cut_physical_power || !capabilities.can_request_power_on {
+        return Err(format!(
+            "device `{device_name}` needs a physical power provider to recover by power cycle"
+        ));
+    }
+
+    let graceful_error = run_recovery_step(
+        device_name,
+        device,
+        executor,
+        RecoveryStage::GracefulShutdown,
+        PlannedStep::GracefulShutdown,
+        SSH_PROBE_TIMEOUT,
+        &mut progress,
+    )
+    .err()
+    .or_else(|| {
+        let timeout = device
+            .shutdown
+            .as_ref()
+            .and_then(|shutdown| shutdown.timeout)
+            .map_or(DEFAULT_TRANSITION_TIMEOUT, |duration| duration.0);
+        run_recovery_step(
+            device_name,
+            device,
+            executor,
+            RecoveryStage::WaitForShutdown,
+            PlannedStep::WaitForShutdown,
+            timeout,
+            &mut progress,
+        )
+        .err()
+    });
+
+    run_recovery_step(
+        device_name,
+        device,
+        executor,
+        RecoveryStage::CutPower,
+        PlannedStep::CutPhysicalPower,
+        SHELLY_TIMEOUT,
+        &mut progress,
+    )?;
+    progress(RecoveryEvent::Started(RecoveryStage::HoldPower));
+    hold(Duration::from_secs(10));
+    progress(RecoveryEvent::Succeeded(RecoveryStage::HoldPower));
+    let restore = run_recovery_step(
+        device_name,
+        device,
+        executor,
+        RecoveryStage::RestorePower,
+        PlannedStep::RequestPowerOn,
+        SHELLY_TIMEOUT,
+        &mut progress,
+    );
+    if let Err(error) = restore {
+        if !error.contains("HTTP 429") {
+            return Err(error);
+        }
+        progress(RecoveryEvent::Started(RecoveryStage::WaitForShelly));
+        hold(Duration::from_secs(10));
+        progress(RecoveryEvent::Succeeded(RecoveryStage::WaitForShelly));
+        run_recovery_step(
+            device_name,
+            device,
+            executor,
+            RecoveryStage::RetryPowerOn,
+            PlannedStep::RequestPowerOn,
+            SHELLY_TIMEOUT,
+            &mut progress,
+        )?;
+    }
+    Ok(RecoveryOutcome { graceful_error })
+}
+
+fn run_recovery_step(
+    device_name: &str,
+    device: &Device,
+    executor: &dyn LifecycleExecutor,
+    stage: RecoveryStage,
+    step: PlannedStep,
+    timeout: Duration,
+    progress: &mut impl FnMut(RecoveryEvent),
+) -> Result<(), String> {
+    progress(RecoveryEvent::Started(stage));
+    let result = executor.execute_step(device_name, device, step, timeout);
+    progress(match &result {
+        Ok(()) => RecoveryEvent::Succeeded(stage),
+        Err(error) => RecoveryEvent::Failed(stage, error.clone()),
+    });
+    result.map_err(|error| {
+        if matches!(
+            stage,
+            RecoveryStage::RestorePower | RecoveryStage::RetryPowerOn
+        ) {
+            format!("restore physical power failed; outlet may remain off: {error}")
+        } else {
+            format!("{}: {error}", stage.label())
+        }
+    })
 }
 
 #[derive(Debug, thiserror::Error)]

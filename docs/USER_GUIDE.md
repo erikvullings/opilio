@@ -111,9 +111,24 @@ away. Power history remains unavailable until a Shelly or another metering
 provider supplies watt readings.
 
 The selected device's TUI details show operation failures and polling errors
-above the graphs. If a configured password environment variable is missing,
-the error names the variable (never its value); set it in the environment
-that launches the TUI and restart the TUI.
+below the graphs, without moving the device summary. If a configured password
+environment variable is missing, the error names the variable (never its
+value); set it in the environment that launches the TUI and restart the TUI.
+
+For Shelly devices, **Outlet** shows the physical switch as `on`, `off`, or
+`unknown` independently of SSH reachability and watts. Unknown means the
+switch could not be observed; it does not mean the outlet is off. In the TUI,
+`r` asks for confirmation even on a single device: it attempts a graceful
+shutdown and waits for SSH to disappear, then cuts physical power. If SSH
+shutdown or the wait fails, it still cuts power. The outlet stays off for
+ten seconds before power is restored to avoid Shelly rate limiting. The TUI shows each stage as it runs,
+and `opilio history <device>` contains stage outcomes and a final reboot
+record. Shelly polling pauses during recovery; the outlet reads `unknown`
+until a fresh observation after the ten-second post-cycle cooldown. If the
+Shelly rate-limits the restore request (HTTP 429), Opilio waits ten seconds
+and retries once. A failed power-on may leave the outlet off; check the
+displayed outlet state before retrying. CLI `opilio reboot` remains an SSH reboot;
+use `opilio power-cycle --force` for an immediate CLI physical cycle.
 
 Multiple services can be attached to one device and are shown independently.
 For an OpenAI-compatible SGLang or LiteLLM model endpoint, extract the complete
