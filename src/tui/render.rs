@@ -7,6 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Sparkline, Wrap},
 };
 
+use crate::power::OutletState;
 use crate::service::ServiceState;
 
 use super::{Dashboard, DashboardDevice, DashboardService, DeviceState, MetricSample, Overlay};
@@ -147,10 +148,12 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         .iter()
         .map(|line| line.width().div_ceil(inner.width.max(1) as usize) + 1)
         .sum::<usize>()
-        .min(inner.height as usize) as u16;
+        .min(inner.height.saturating_sub(detail_height.saturating_add(2)) as usize)
+        as u16;
     let errors = Paragraph::new(messages).wrap(Wrap { trim: true });
+    let sections =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(error_height)]).split(inner);
     let mut constraints = vec![
-        Constraint::Length(error_height),
         Constraint::Length(detail_height),
         Constraint::Length(chart_height),
         Constraint::Length(1),
@@ -163,9 +166,8 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(inner);
-    frame.render_widget(errors, chunks[0]);
-    frame.render_widget(Paragraph::new(details), chunks[1]);
+        .split(sections[0]);
+    frame.render_widget(Paragraph::new(details), chunks[0]);
     let ram_used = device
         .ram_used_bytes
         .map(|bytes| format!("{:.1} GiB", gibibytes(bytes)));
@@ -174,7 +176,7 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         "RAM used",
         "%",
         &device.ram_history,
-        chunks[2],
+        chunks[1],
         ram_used.as_deref(),
         Some((0.0, 100.0)),
     );
@@ -183,7 +185,7 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
         "GPU busy",
         "%",
         &device.gpu_history,
-        chunks[4],
+        chunks[3],
         None,
         Some((0.0, 100.0)),
     );
@@ -193,11 +195,12 @@ fn render_details(frame: &mut Frame<'_>, dashboard: &Dashboard, area: Rect) {
             "Power draw",
             " W",
             &device.watts_history,
-            chunks[5],
+            chunks[4],
             None,
             None,
         );
     }
+    frame.render_widget(errors, sections[1]);
 }
 
 fn detail_lines(device: &DashboardDevice, show_power: bool) -> Vec<Line<'static>> {
@@ -216,6 +219,23 @@ fn detail_lines(device: &DashboardDevice, show_power: bool) -> Vec<Line<'static>
         detail_row("RAM used", vec![Span::raw(memory_used(device))]),
         detail_row("GPU busy", vec![Span::raw(percent(device.gpu_percent))]),
     ];
+    if let Some(outlet) = device.outlet {
+        lines.push(detail_row(
+            "Outlet",
+            vec![Span::styled(
+                match outlet {
+                    OutletState::On => "on",
+                    OutletState::Off => "off",
+                    OutletState::Unknown => "unknown",
+                },
+                Style::default().fg(match outlet {
+                    OutletState::On => Color::Green,
+                    OutletState::Off => Color::DarkGray,
+                    OutletState::Unknown => Color::Yellow,
+                }),
+            )],
+        ));
+    }
     if show_power {
         lines.push(detail_row(
             "Power draw",
@@ -392,11 +412,18 @@ fn render_overlay(frame: &mut Frame<'_>, dashboard: &Dashboard) {
             target,
             devices,
         } => {
-            let body = format!(
-                "{} `{target}` on:\n{}\n\n[y/Enter] confirm  [n/Esc] cancel",
-                operation.label(),
-                devices.join(", ")
-            );
+            let body = if *operation == super::Operation::Reboot {
+                format!(
+                    "Power cycle `{target}` on: {}\nTry graceful SSH shutdown first.\nCUT physical power even if SSH fails.\nHold outlet off for 10s, then turn it on.\nUnsaved work may be lost.\n[y/Enter] confirm  [n/Esc] cancel",
+                    devices.join(", ")
+                )
+            } else {
+                format!(
+                    "{} `{target}` on:\n{}\n\n[y/Enter] confirm  [n/Esc] cancel",
+                    operation.label(),
+                    devices.join(", ")
+                )
+            };
             render_popup(frame, " Confirm operation ", &body);
             return;
         }

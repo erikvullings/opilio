@@ -31,7 +31,8 @@ use crate::{
     history::{HistoryResult, HistoryStore, NewHistoryRecord, OperationSource, Redactor},
     lifecycle::{
         LifecycleOperation, LifecycleReport, LifecycleRequest, LifecycleResultStatus,
-        LifecycleState, SystemLifecycleExecutor, execute_lifecycle, plan_lifecycle,
+        LifecycleState, RecoveryEvent, RecoveryStage, SystemLifecycleExecutor, execute_lifecycle,
+        execute_recovery_cycle, plan_lifecycle,
     },
     power::{
         Metric as PowerMetric, OutletState, PowerProvider,
@@ -64,6 +65,11 @@ const SSH_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum RuntimeMessage {
     Poll(DashboardSample),
+    Progress {
+        device: String,
+        detail: String,
+        outlet_uncertain: bool,
+    },
     Operation {
         device: String,
         operation: String,
@@ -80,7 +86,7 @@ type RuntimeShellyProvider = ShellyProvider<ShellyHttpClient>;
 type PowerObservation = (OutletState, Option<f64>, Option<String>);
 
 struct CachedPowerProvider {
-    provider: RuntimeShellyProvider,
+    provider: Arc<RuntimeShellyProvider>,
     observations: Mutex<PowerObservationCache>,
 }
 
@@ -91,6 +97,11 @@ struct PowerObservationCache {
 }
 
 impl PowerObservationCache {
+    fn defer(&mut self, now: Instant) {
+        self.last = Some((now, (OutletState::Unknown, None, None)));
+        self.consecutive_rate_limits = 0;
+    }
+
     fn observe(
         &mut self,
         now: Instant,
@@ -134,6 +145,18 @@ struct PowerProviderPool {
 }
 
 impl PowerProviderPool {
+    fn defer_observation(&self, name: &str) -> Result<(), String> {
+        match self.providers.get(name) {
+            Some(Ok(provider)) => provider
+                .observations
+                .lock()
+                .map_err(|_| "Shelly observation lock poisoned".to_owned())
+                .map(|mut cache| cache.defer(Instant::now())),
+            Some(Err(error)) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+
     fn new(config: &Config) -> Self {
         let providers = config
             .devices()
@@ -145,7 +168,7 @@ impl PowerProviderPool {
                 let provider = ShellyProvider::from_device(device, POWER_TIMEOUT)
                     .map(|provider| {
                         Arc::new(CachedPowerProvider {
-                            provider,
+                            provider: Arc::new(provider),
                             observations: Mutex::new(PowerObservationCache::default()),
                         })
                     })
@@ -273,7 +296,13 @@ pub fn run(config: Config) -> io::Result<()> {
     let mut polls_in_flight = HashSet::new();
 
     loop {
-        drain_messages(&mut dashboard, &mut policy, &receiver, &mut polls_in_flight);
+        drain_messages(
+            &mut dashboard,
+            &mut policy,
+            &receiver,
+            &mut polls_in_flight,
+            &power_providers,
+        );
         jobs.reap();
         let now = Instant::now();
         let due = policy.due(now);
@@ -323,6 +352,7 @@ pub fn run(config: Config) -> io::Result<()> {
                             operation,
                             target,
                             sender.clone(),
+                            Arc::clone(&power_providers),
                             &mut jobs,
                         );
                     }
@@ -348,6 +378,12 @@ fn spawn_due_polls(
     polls_in_flight: &mut HashSet<String>,
 ) {
     for name in dashboard.visible_devices() {
+        if dashboard
+            .device(name)
+            .is_some_and(|device| device.busy.is_some())
+        {
+            continue;
+        }
         let site = config.devices()[name].site.as_deref().unwrap_or("");
         if !policy.site_due(site, Instant::now()) || !polls_in_flight.insert(name.to_owned()) {
             continue;
@@ -389,6 +425,7 @@ fn poll_device(
         ram_total_bytes: None,
         gpu_percent: None,
         watts: power.as_ref().and_then(|(_, watts, _)| *watts),
+        outlet: power.as_ref().map(|(outlet, _, _)| *outlet),
         services: None,
         error: power.as_ref().and_then(|(_, _, error)| error.clone()),
     };
@@ -784,8 +821,13 @@ fn spawn_operation(
     operation: Operation,
     target: String,
     sender: Sender<RuntimeMessage>,
+    power_providers: Arc<PowerProviderPool>,
     jobs: &mut BackgroundJobs,
 ) {
+    if operation == Operation::Reboot {
+        spawn_recovery_cycle(config, target, sender, power_providers, jobs);
+        return;
+    }
     jobs.spawn(move |_| {
         let started = Instant::now();
         let selected = Target::resolve(&target, &config).unwrap_or_default();
@@ -823,6 +865,179 @@ fn spawn_operation(
             }
         }
     });
+}
+
+fn spawn_recovery_cycle(
+    config: Config,
+    target: String,
+    sender: Sender<RuntimeMessage>,
+    power_providers: Arc<PowerProviderPool>,
+    jobs: &mut BackgroundJobs,
+) {
+    jobs.spawn(move |_| {
+        let selected = match Target::resolve(&target, &config) {
+            Ok(devices) => devices,
+            Err(error) => {
+                let _ = sender.send(RuntimeMessage::Progress {
+                    device: target,
+                    detail: format!("power cycle failed: {error}"),
+                    outlet_uncertain: false,
+                });
+                return;
+            }
+        };
+        let history =
+            match HistoryStore::platform_default(Redactor::new(config.resolved_secret_values())) {
+                Ok(store) => store,
+                Err(error) => {
+                    send_operation_failures(
+                        &sender,
+                        &selected,
+                        "power cycle",
+                        &format!("cannot record power cycle: {error}"),
+                    );
+                    return;
+                }
+            };
+        for name in selected {
+            let device = &config.devices()[&name];
+            let executor = SystemLifecycleExecutor::system();
+            let mut stage_started = Instant::now();
+            let mut history_error = None;
+            let started = Instant::now();
+            let prepared = match power_providers.providers.get(&name) {
+                Some(Ok(provider)) => {
+                    executor.reuse_power_provider(&name, provider.provider.clone())
+                }
+                Some(Err(error)) => Err(error.clone()),
+                None => executor.prepare_power(&name, device),
+            };
+            let outcome =
+                prepared.and_then(|()| {
+                    execute_recovery_cycle(&name, device, &executor, thread::sleep, |event| {
+                        match &event {
+                            RecoveryEvent::Started(stage) => {
+                                stage_started = Instant::now();
+                                let _ = sender.send(RuntimeMessage::Progress {
+                                    device: name.clone(),
+                                    detail: stage.label().to_owned(),
+                                    outlet_uncertain: matches!(
+                                        stage,
+                                        RecoveryStage::CutPower
+                                            | RecoveryStage::RestorePower
+                                            | RecoveryStage::RetryPowerOn
+                                    ),
+                                });
+                            }
+                            RecoveryEvent::Succeeded(stage) | RecoveryEvent::Failed(stage, _) => {
+                                if let Err(error) = record_recovery_stage(
+                                    &history,
+                                    &target,
+                                    &name,
+                                    *stage,
+                                    &event,
+                                    stage_started.elapsed(),
+                                ) {
+                                    if history_error.is_none() {
+                                        history_error = Some(error.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    })
+                });
+            let (state, error, operation_name) = match outcome {
+                Ok(outcome) => {
+                    let operation_name = outcome.graceful_error.map_or_else(
+                        || "power cycle".to_owned(),
+                        |reason| format!("power cycle (forced fallback: {reason})"),
+                    );
+                    (DeviceState::Booting, None, operation_name)
+                }
+                Err(error) => (DeviceState::Error, Some(error), "power cycle".to_owned()),
+            };
+            let result = match (error, history_error) {
+                (Some(error), Some(history_error)) => Err(format!(
+                    "{error}; power cycle history could not be saved: {history_error}"
+                )),
+                (Some(error), None) => Err(error),
+                (None, Some(history_error)) => Err(format!(
+                    "power cycle history could not be saved: {history_error}"
+                )),
+                (None, None) => Ok(state),
+            };
+            let final_error = result.as_ref().err().cloned();
+            if let Err(error) = history.append(NewHistoryRecord {
+                source: OperationSource::Tui,
+                operation: "reboot".to_owned(),
+                action: None,
+                requested_target: target.clone(),
+                resolved_device: name.clone(),
+                duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                result: if final_error.is_some() {
+                    HistoryResult::Failed
+                } else {
+                    HistoryResult::Succeeded
+                },
+                exit_code: Some(i32::from(final_error.is_some())),
+                force: true,
+                stdout: None,
+                stderr: None,
+                error: final_error,
+            }) {
+                let failure = match result {
+                    Ok(_) => format!("power cycle history could not be saved: {error}"),
+                    Err(failure) => {
+                        format!("{failure}; power cycle history could not be saved: {error}")
+                    }
+                };
+                let _ = sender.send(RuntimeMessage::Operation {
+                    device: name,
+                    operation: operation_name,
+                    result: Err(failure),
+                });
+                continue;
+            }
+            let _ = sender.send(RuntimeMessage::Operation {
+                device: name,
+                operation: operation_name,
+                result,
+            });
+        }
+    });
+}
+
+fn record_recovery_stage(
+    history: &HistoryStore,
+    target: &str,
+    device: &str,
+    stage: RecoveryStage,
+    event: &RecoveryEvent,
+    duration: Duration,
+) -> Result<(), crate::history::HistoryError> {
+    let error = match event {
+        RecoveryEvent::Failed(_, error) => Some(error.clone()),
+        RecoveryEvent::Started(_) | RecoveryEvent::Succeeded(_) => None,
+    };
+    history.append(NewHistoryRecord {
+        source: OperationSource::Tui,
+        operation: stage.history_name().to_owned(),
+        action: None,
+        requested_target: target.to_owned(),
+        resolved_device: device.to_owned(),
+        duration_ms: duration.as_millis().min(u128::from(u64::MAX)) as u64,
+        result: if error.is_some() {
+            HistoryResult::Failed
+        } else {
+            HistoryResult::Succeeded
+        },
+        exit_code: Some(i32::from(error.is_some())),
+        force: stage.is_forced(),
+        stdout: None,
+        stderr: None,
+        error,
+    })?;
+    Ok(())
 }
 
 fn spawn_action(
@@ -947,11 +1162,37 @@ fn drain_messages(
     policy: &mut PollPolicy,
     receiver: &Receiver<RuntimeMessage>,
     polls_in_flight: &mut HashSet<String>,
+    power_providers: &PowerProviderPool,
 ) {
     while let Ok(message) = receiver.try_recv() {
         match message {
+            RuntimeMessage::Progress {
+                device,
+                detail,
+                outlet_uncertain,
+            } => {
+                let detail = if outlet_uncertain {
+                    match power_providers.defer_observation(&device) {
+                        Ok(()) => detail,
+                        Err(error) => format!("{detail}; outlet polling unavailable: {error}"),
+                    }
+                } else {
+                    detail
+                };
+                dashboard.update(Event::OperationProgress {
+                    device,
+                    detail,
+                    outlet_uncertain,
+                });
+            }
             RuntimeMessage::Poll(sample) => {
                 polls_in_flight.remove(&sample.device);
+                if dashboard
+                    .device(&sample.device)
+                    .is_some_and(|device| device.busy.is_some())
+                {
+                    continue;
+                }
                 let site = dashboard
                     .device(&sample.device)
                     .and_then(|device| device.site.clone())
@@ -968,6 +1209,15 @@ fn drain_messages(
                 operation,
                 result,
             } => {
+                if operation.starts_with("power cycle")
+                    && let Err(error) = power_providers.defer_observation(&device)
+                {
+                    dashboard.update(Event::OperationProgress {
+                        device: device.clone(),
+                        detail: format!("outlet polling unavailable: {error}"),
+                        outlet_uncertain: true,
+                    });
+                }
                 dashboard.update(Event::OperationFinished {
                     device,
                     operation,
@@ -1078,6 +1328,8 @@ mod tests {
     };
 
     use crate::{
+        history::{HistoryConfig, HistoryResult, HistoryStore, Redactor},
+        lifecycle::{RecoveryEvent, RecoveryStage},
         power::OutletState,
         ssh::{ProcessAdapter, ProcessError, ProcessOutput, ProcessRequest},
         tui::DashboardSample,
@@ -1085,8 +1337,9 @@ mod tests {
 
     use super::{
         CancellationToken, Config, ControlMasterPool, DeviceState, OpenSsh, PowerObservationCache,
-        PowerProviderPool, RuntimeMessage, SSH_STARTUP_TIMEOUT, control_path, model_names, mpsc,
-        poll_device, poll_power, send_operation_failures, unreachable_sample,
+        PowerProviderPool, RuntimeMessage, SSH_STARTUP_TIMEOUT, control_path, drain_messages,
+        model_names, mpsc, poll_device, poll_power, record_recovery_stage, send_operation_failures,
+        unreachable_sample,
     };
 
     struct FakeProcess {
@@ -1193,6 +1446,65 @@ mod tests {
     }
 
     #[test]
+    fn recovery_defers_shelly_polling_until_cooldown_expires() {
+        let started = Instant::now();
+        let mut cache = PowerObservationCache::default();
+        cache.defer(started);
+        assert_eq!(
+            cache.observe(started + Duration::from_secs(9), || {
+                panic!("Shelly must not be polled during cooldown")
+            }),
+            (OutletState::Unknown, None, None)
+        );
+        assert_eq!(
+            cache.observe(started + Duration::from_secs(10), || {
+                (OutletState::On, Some(1.3), None)
+            }),
+            (OutletState::On, Some(1.3), None)
+        );
+    }
+
+    #[test]
+    fn late_poll_cannot_overwrite_recovery_progress() {
+        let config = config();
+        let mut dashboard = crate::tui::Dashboard::from_config(&config);
+        dashboard.update(crate::tui::Event::OperationProgress {
+            device: "alpha".into(),
+            detail: "hold power off for 10s".into(),
+            outlet_uncertain: true,
+        });
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(RuntimeMessage::Poll(DashboardSample {
+                device: "alpha".into(),
+                state: DeviceState::Running,
+                ram_percent: None,
+                ram_used_bytes: None,
+                ram_total_bytes: None,
+                gpu_percent: None,
+                watts: Some(100.0),
+                outlet: Some(OutletState::On),
+                services: None,
+                error: None,
+            }))
+            .unwrap();
+        let mut in_flight = std::collections::HashSet::from(["alpha".to_owned()]);
+        drain_messages(
+            &mut dashboard,
+            &mut crate::tui::PollPolicy::new(Instant::now()),
+            &receiver,
+            &mut in_flight,
+            &PowerProviderPool::new(&config),
+        );
+        assert!(in_flight.is_empty());
+        assert_eq!(
+            dashboard.device("alpha").unwrap().outlet,
+            Some(OutletState::Unknown)
+        );
+        assert_eq!(dashboard.device("alpha").unwrap().watts, None);
+    }
+
+    #[test]
     fn control_socket_names_are_short_and_device_specific() {
         let first = control_path(&"a".repeat(63));
         let second = control_path(&format!("{}b", "a".repeat(62)));
@@ -1290,6 +1602,7 @@ mod tests {
                 ram_total_bytes: None,
                 gpu_percent: None,
                 watts: None,
+                outlet: None,
                 services: None,
                 error: None,
             },
@@ -1318,6 +1631,7 @@ mod tests {
                 ram_total_bytes: None,
                 gpu_percent: None,
                 watts: None,
+                outlet: None,
                 services: None,
                 error: power.2.clone(),
             },
@@ -1348,10 +1662,79 @@ mod tests {
                     assert_eq!(result, Err("planning failed".to_owned()));
                     device
                 }
-                RuntimeMessage::Poll(_) => panic!("unexpected poll message"),
+                RuntimeMessage::Poll(_) | RuntimeMessage::Progress { .. } => {
+                    panic!("unexpected message")
+                }
             })
             .collect::<Vec<_>>();
         assert_eq!(devices, ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn recovery_history_records_every_stage_with_force_and_redaction() {
+        let directory =
+            std::env::temp_dir().join(format!("opilio-recovery-{}", uuid::Uuid::new_v4()));
+        let history = HistoryStore::with_redactor(
+            HistoryConfig {
+                directory: directory.clone(),
+                max_file_bytes: 1024 * 1024,
+                max_files: 2,
+                failure_tail_bytes: 1024,
+            },
+            Redactor::new(["private-token".to_owned()]),
+        )
+        .unwrap();
+        for (stage, event) in [
+            (
+                RecoveryStage::GracefulShutdown,
+                RecoveryEvent::Failed(
+                    RecoveryStage::GracefulShutdown,
+                    "SSH failed: private-token".into(),
+                ),
+            ),
+            (
+                RecoveryStage::CutPower,
+                RecoveryEvent::Succeeded(RecoveryStage::CutPower),
+            ),
+            (
+                RecoveryStage::HoldPower,
+                RecoveryEvent::Succeeded(RecoveryStage::HoldPower),
+            ),
+            (
+                RecoveryStage::RestorePower,
+                RecoveryEvent::Succeeded(RecoveryStage::RestorePower),
+            ),
+        ] {
+            record_recovery_stage(
+                &history,
+                "alpha",
+                "alpha",
+                stage,
+                &event,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        }
+        let records = history.list(Some("alpha")).unwrap().records;
+        assert_eq!(records.len(), 4);
+        assert!(records.iter().any(|record| {
+            record.operation == "reboot-graceful-shutdown"
+                && matches!(record.result, HistoryResult::Failed)
+                && !record.force
+                && record.error.as_deref() == Some("SSH failed: [REDACTED]")
+        }));
+        for operation in [
+            "reboot-cut-power",
+            "reboot-hold-power",
+            "reboot-restore-power",
+        ] {
+            assert!(records.iter().any(|record| {
+                record.operation == operation
+                    && matches!(record.result, HistoryResult::Succeeded)
+                    && record.force
+            }));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

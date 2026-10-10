@@ -305,6 +305,15 @@ Conceptual layout:
 
 TUI v1 operations: status, on/off/reboot, named actions, SSH, confirmations, live telemetry/service status, in-memory graphs, recent failure indication. No config editor/full log viewer/embedded terminal.
 
+TUI recovery extension: `r` on a Shelly-powered device requires confirmation
+and attempts graceful shutdown first. It waits for SSH to disappear; if either
+SSH step fails, it proceeds with the confirmed physical cut. After ten seconds
+off it restores power. The TUI reports the current stage and records each
+stage, including fallback failures, in local operation history. This TUI
+behavior does not change the CLI `reboot` operation. Display observed Shelly
+outlet state (on/off/unknown) independently of the device's SSH state and
+electrical power draw.
+
 ## 16. Diagnostics
 
 `opilio config check` performs static validation only: YAML/schema, references, ambiguity, mutually exclusive fields, etc.

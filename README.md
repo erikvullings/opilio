@@ -184,7 +184,7 @@ CI runs these checks and builds optimized release binaries on Linux, macOS,
 and Windows.
 
 <details>
-<summary>Implementation status — 28 / 28 tasks done</summary>
+<summary>Implementation status — 30 / 30 tasks done</summary>
 
 | Task | Status | Depends on | Outcome |
 |---|---|---|---|
@@ -216,5 +216,7 @@ and Windows.
 | [0026 Publish Windows-ready release](TASKS/0026-publish-windows-ready-release.md) | done | 0025 | Publish verified cross-platform archives |
 | [0027 Keep selected status readable](TASKS/0027-keep-selected-status-readable.md) | done | 0023 | Restore status contrast on selected TUI row |
 | [0028 Show missing secrets in TUI](TASKS/0028-show-missing-secrets-in-tui.md) | done | 0021, 0022 | Make missing environment secrets visible in device details |
+| [0029 TUI recovery cycle and outlet state](TASKS/0029-tui-recovery-cycle-and-outlet-state.md) | done | 0008, 0011, 0012, 0028 | Recover stuck Shelly devices with staged power control |
+| [0030 Keep TUI details below graphs](TASKS/0030-keep-tui-details-below-graphs.md) | done | 0028, 0029 | Keep summary layout stable while surfacing errors |
 
 </details>

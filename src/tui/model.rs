@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{config::Config, service::ServiceState};
+use crate::{config::Config, power::OutletState, service::ServiceState};
 
 const HISTORY_CAPACITY: usize = 60;
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -53,6 +53,7 @@ pub struct DashboardDevice {
     pub ram_total_bytes: Option<u64>,
     pub gpu_percent: Option<f64>,
     pub watts: Option<f64>,
+    pub outlet: Option<OutletState>,
     pub ram_history: VecDeque<MetricSample>,
     pub gpu_history: VecDeque<MetricSample>,
     pub watts_history: VecDeque<MetricSample>,
@@ -78,6 +79,7 @@ pub struct DashboardSample {
     pub ram_total_bytes: Option<u64>,
     pub gpu_percent: Option<f64>,
     pub watts: Option<f64>,
+    pub outlet: Option<OutletState>,
     pub services: Option<Vec<DashboardService>>,
     pub error: Option<String>,
 }
@@ -145,6 +147,11 @@ pub enum Event {
         device: String,
         operation: String,
         result: Result<DeviceState, String>,
+    },
+    OperationProgress {
+        device: String,
+        detail: String,
+        outlet_uncertain: bool,
     },
 }
 
@@ -231,6 +238,7 @@ impl Dashboard {
                         ram_total_bytes: None,
                         gpu_percent: None,
                         watts: None,
+                        outlet: None,
                         ram_history: VecDeque::with_capacity(HISTORY_CAPACITY),
                         gpu_history: VecDeque::with_capacity(HISTORY_CAPACITY),
                         watts_history: VecDeque::with_capacity(HISTORY_CAPACITY),
@@ -286,6 +294,21 @@ impl Dashboard {
                     }
                 }
                 self.message = Some(message);
+                Vec::new()
+            }
+            Event::OperationProgress {
+                device,
+                detail,
+                outlet_uncertain,
+            } => {
+                if let Some(item) = self.devices.get_mut(&device) {
+                    item.busy = Some(detail.clone());
+                    if outlet_uncertain {
+                        item.outlet = Some(OutletState::Unknown);
+                        item.watts = None;
+                    }
+                }
+                self.message = Some(format!("{device}: {detail}"));
                 Vec::new()
             }
             Event::Key(key) => self.update_key(key),
@@ -418,7 +441,18 @@ impl Dashboard {
     fn operation(&mut self, operation: Operation) -> Vec<Effect> {
         let target = self.current_target();
         if self.focus == Focus::Scopes {
-            let devices = self.visible_devices_owned();
+            let devices = self
+                .scoped_devices()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if devices.iter().any(|name| {
+                self.devices
+                    .get(name)
+                    .is_some_and(|device| device.busy.is_some())
+            }) {
+                return Vec::new();
+            }
             self.overlay = Overlay::Confirm {
                 operation,
                 target,
@@ -426,6 +460,17 @@ impl Dashboard {
             };
             Vec::new()
         } else if let Some(device) = self.selected_device().map(str::to_owned) {
+            if self.devices[&device].busy.is_some() {
+                return Vec::new();
+            }
+            if operation == Operation::Reboot {
+                self.overlay = Overlay::Confirm {
+                    operation,
+                    target: device.clone(),
+                    devices: vec![device],
+                };
+                return Vec::new();
+            }
             self.mark_busy(&device, operation.label());
             vec![Effect::Operate {
                 operation,
@@ -453,7 +498,10 @@ impl Dashboard {
         let affected = if self.devices.contains_key(target) {
             vec![target.to_owned()]
         } else {
-            self.visible_devices_owned()
+            self.scoped_devices()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
         };
         for name in affected {
             if let Some(device) = self.devices.get_mut(&name) {
@@ -482,9 +530,8 @@ impl Dashboard {
         if sample.gpu_percent.is_some() {
             device.gpu_percent = sample.gpu_percent;
         }
-        if sample.watts.is_some() {
-            device.watts = sample.watts;
-        }
+        device.watts = sample.watts;
+        device.outlet = sample.outlet;
         push_metric(&mut device.ram_history, sample.ram_percent);
         push_metric(&mut device.gpu_history, sample.gpu_percent);
         push_metric(&mut device.watts_history, sample.watts);
@@ -521,16 +568,11 @@ impl Dashboard {
     }
 
     pub fn visible_devices(&self) -> Vec<&str> {
-        let scope = &self.scopes[self.selected_scope].kind;
         let filter = self.filter.to_ascii_lowercase();
-        self.devices
-            .values()
-            .filter(|device| match scope {
-                ScopeKind::All => true,
-                ScopeKind::Site(site) => device.site.as_ref() == Some(site),
-                ScopeKind::Group(group) => device.groups.contains(group),
-            })
-            .filter(|device| {
+        self.scoped_devices()
+            .into_iter()
+            .filter(|name| {
+                let device = &self.devices[*name];
                 filter.is_empty()
                     || device.name.to_ascii_lowercase().contains(&filter)
                     || device
@@ -538,14 +580,19 @@ impl Dashboard {
                         .as_deref()
                         .is_some_and(|label| label.to_ascii_lowercase().contains(&filter))
             })
-            .map(|device| device.name.as_str())
             .collect()
     }
 
-    fn visible_devices_owned(&self) -> Vec<String> {
-        self.visible_devices()
-            .into_iter()
-            .map(str::to_owned)
+    fn scoped_devices(&self) -> Vec<&str> {
+        let scope = &self.scopes[self.selected_scope].kind;
+        self.devices
+            .values()
+            .filter(|device| match scope {
+                ScopeKind::All => true,
+                ScopeKind::Site(site) => device.site.as_ref() == Some(site),
+                ScopeKind::Group(group) => device.groups.contains(group),
+            })
+            .map(|device| device.name.as_str())
             .collect()
     }
 

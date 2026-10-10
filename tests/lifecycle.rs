@@ -13,8 +13,9 @@ use opilio::{
     config::Config,
     lifecycle::{
         DeviceLifecycleResult, LifecycleError, LifecycleExecutor, LifecycleOperation,
-        LifecycleRequest, LifecycleState, PlannedStep, SystemLifecycleExecutor, execute_lifecycle,
-        plan_lifecycle, write_human, write_json,
+        LifecycleRequest, LifecycleState, PlannedStep, RecoveryEvent, RecoveryStage,
+        SystemLifecycleExecutor, execute_lifecycle, execute_recovery_cycle, plan_lifecycle,
+        write_human, write_json,
     },
     power::PowerCapabilities,
     ssh::{ProcessAdapter, ProcessError, ProcessOutput, ProcessRequest},
@@ -77,6 +78,7 @@ groups:
 struct FakeExecutor {
     calls: Mutex<Vec<(String, PlannedStep)>>,
     failures: Mutex<BTreeMap<(String, PlannedStep), String>>,
+    once: Mutex<Vec<(String, PlannedStep, String)>>,
 }
 
 impl FakeExecutor {
@@ -96,6 +98,13 @@ impl FakeExecutor {
             .map(|(_, step)| *step)
             .collect()
     }
+
+    fn fail_once(&self, device: &str, step: PlannedStep, error: &str) {
+        self.once
+            .lock()
+            .unwrap()
+            .push((device.to_owned(), step, error.to_owned()));
+    }
 }
 
 impl LifecycleExecutor for FakeExecutor {
@@ -110,6 +119,13 @@ impl LifecycleExecutor for FakeExecutor {
             .lock()
             .unwrap()
             .push((device_name.to_owned(), step));
+        let mut once = self.once.lock().unwrap();
+        if let Some(index) = once
+            .iter()
+            .position(|(device, candidate, _)| device == device_name && *candidate == step)
+        {
+            return Err(once.remove(index).2);
+        }
         self.failures
             .lock()
             .unwrap()
@@ -200,6 +216,182 @@ fn force_selects_only_explicit_bypass_cut_and_cycle_plans() {
         let plan = plan_lifecycle(&config, request).unwrap();
         assert_eq!(plan.devices[0].steps, expected);
     }
+}
+
+#[test]
+fn tui_recovery_cycle_waits_off_before_restoring_power() {
+    let config = Config::from_yaml(CONFIG).unwrap();
+    let executor = FakeExecutor::default();
+    let mut events = Vec::new();
+    let mut held = Vec::new();
+    let outcome = execute_recovery_cycle(
+        "shelly",
+        &config.devices()["shelly"],
+        &executor,
+        |duration| held.push(duration),
+        |event| events.push(event),
+    )
+    .unwrap();
+
+    assert_eq!(outcome.graceful_error, None);
+    assert_eq!(held, [Duration::from_secs(10)]);
+    assert_eq!(
+        executor.calls_for("shelly"),
+        [
+            PlannedStep::GracefulShutdown,
+            PlannedStep::WaitForShutdown,
+            PlannedStep::CutPhysicalPower,
+            PlannedStep::RequestPowerOn,
+        ]
+    );
+    assert!(events.contains(&RecoveryEvent::Started(RecoveryStage::HoldPower)));
+    assert!(events.contains(&RecoveryEvent::Succeeded(RecoveryStage::HoldPower)));
+}
+
+#[test]
+fn tui_recovery_cycle_forces_cut_after_failed_shutdown_and_stops_if_cut_fails() {
+    let config = Config::from_yaml(CONFIG).unwrap();
+    let executor = FakeExecutor::default();
+    executor.fail("shelly", PlannedStep::GracefulShutdown, "SSH timed out");
+    let mut events = Vec::new();
+    let outcome = execute_recovery_cycle(
+        "shelly",
+        &config.devices()["shelly"],
+        &executor,
+        |_| {},
+        |event| events.push(event),
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.graceful_error.as_deref(),
+        Some("graceful shutdown: SSH timed out")
+    );
+    assert_eq!(
+        executor.calls_for("shelly"),
+        [
+            PlannedStep::GracefulShutdown,
+            PlannedStep::CutPhysicalPower,
+            PlannedStep::RequestPowerOn,
+        ]
+    );
+    assert!(events.contains(&RecoveryEvent::Failed(
+        RecoveryStage::GracefulShutdown,
+        "SSH timed out".into()
+    )));
+
+    let executor = FakeExecutor::default();
+    executor.fail(
+        "shelly",
+        PlannedStep::CutPhysicalPower,
+        "Shelly unavailable",
+    );
+    let error = execute_recovery_cycle(
+        "shelly",
+        &config.devices()["shelly"],
+        &executor,
+        |_| panic!("must not pause when cut failed"),
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(error.contains("Shelly unavailable"));
+    assert!(
+        !executor
+            .calls_for("shelly")
+            .contains(&PlannedStep::RequestPowerOn)
+    );
+}
+
+#[test]
+fn tui_recovery_cycle_falls_back_after_shutdown_wait_and_reports_restore_failure() {
+    let config = Config::from_yaml(CONFIG).unwrap();
+    let executor = FakeExecutor::default();
+    executor.fail("shelly", PlannedStep::WaitForShutdown, "still reachable");
+    executor.fail("shelly", PlannedStep::RequestPowerOn, "HTTP 429");
+    let mut events = Vec::new();
+    let error = execute_recovery_cycle(
+        "shelly",
+        &config.devices()["shelly"],
+        &executor,
+        |_| {},
+        |event| events.push(event),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("outlet may remain off"), "{error}");
+    assert!(error.contains("HTTP 429"), "{error}");
+    assert!(events.contains(&RecoveryEvent::Failed(
+        RecoveryStage::WaitForShutdown,
+        "still reachable".into()
+    )));
+    assert!(
+        executor
+            .calls_for("shelly")
+            .contains(&PlannedStep::CutPhysicalPower)
+    );
+}
+
+#[test]
+fn tui_recovery_cycle_retries_rate_limited_power_on_once() {
+    let config = Config::from_yaml(CONFIG).unwrap();
+    let executor = FakeExecutor::default();
+    executor.fail_once("shelly", PlannedStep::RequestPowerOn, "HTTP 429");
+    let mut waits = Vec::new();
+    let mut events = Vec::new();
+    execute_recovery_cycle(
+        "shelly",
+        &config.devices()["shelly"],
+        &executor,
+        |duration| waits.push(duration),
+        |event| events.push(event),
+    )
+    .unwrap();
+
+    assert_eq!(waits, [Duration::from_secs(10), Duration::from_secs(10)]);
+    assert_eq!(
+        executor
+            .calls_for("shelly")
+            .iter()
+            .filter(|step| **step == PlannedStep::RequestPowerOn)
+            .count(),
+        2
+    );
+    assert!(events.contains(&RecoveryEvent::Failed(
+        RecoveryStage::RestorePower,
+        "HTTP 429".into()
+    )));
+    assert!(events.contains(&RecoveryEvent::Started(RecoveryStage::WaitForShelly)));
+    assert!(events.contains(&RecoveryEvent::Succeeded(RecoveryStage::RetryPowerOn)));
+}
+
+#[test]
+fn tui_recovery_cycle_rejects_non_shelly_provider_before_ssh() {
+    let config = Config::from_yaml(CONFIG).unwrap();
+    let executor = FakeExecutor::default();
+    for device in ["wol", "bare"] {
+        let result = execute_recovery_cycle(
+            device,
+            &config.devices()[device],
+            &executor,
+            |_| panic!("must not pause without physical power provider"),
+            |_| panic!("must not attempt a step without physical power provider"),
+        );
+        assert!(result.unwrap_err().contains("physical power provider"));
+        assert!(executor.calls_for(device).is_empty());
+    }
+}
+
+#[test]
+fn missing_shelly_secret_blocks_cycle_before_graceful_shutdown() {
+    let config = Config::from_yaml(
+        "devices:\n  spark:\n    ssh: spark\n    power:\n      type: shelly\n      host: 127.0.0.1\n      auth:\n        password: \"${env:OPILIO_TEST_MISSING_RECOVERY_SECRET_0029}\"\n",
+    )
+    .unwrap();
+    let executor = SystemLifecycleExecutor::system();
+
+    let error = executor
+        .prepare_power("spark", &config.devices()["spark"])
+        .unwrap_err();
+    assert!(error.contains("OPILIO_TEST_MISSING_RECOVERY_SECRET_0029"));
 }
 
 #[test]

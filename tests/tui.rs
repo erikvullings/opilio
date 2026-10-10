@@ -4,6 +4,7 @@ use ratatui::{Terminal, backend::TestBackend, style::Color};
 
 use opilio::{
     config::Config,
+    power::OutletState,
     service::ServiceState,
     tui::{
         Dashboard, DashboardSample, DashboardService, DeviceState, Effect, Event, Key,
@@ -71,6 +72,11 @@ fn collection_operations_require_confirmation_but_single_device_does_not() {
             target: "alpha".into(),
         }]
     );
+    dashboard.update(Event::OperationFinished {
+        device: "alpha".into(),
+        operation: "off".into(),
+        result: Ok(DeviceState::Off),
+    });
 
     dashboard.update(Event::Key(Key::Left));
     dashboard.update(Event::Key(Key::Down));
@@ -91,6 +97,102 @@ fn collection_operations_require_confirmation_but_single_device_does_not() {
         }]
     );
     assert_eq!(dashboard.overlay(), &Overlay::None);
+}
+
+#[test]
+fn reboot_requires_confirmation_even_for_one_device_and_warns_about_forced_power() {
+    let mut dashboard = Dashboard::from_config(&config());
+    assert!(dashboard.update(Event::Key(Key::Reboot)).is_empty());
+    assert!(matches!(dashboard.overlay(), Overlay::Confirm { .. }));
+    let popup = render_to_string(&dashboard, 120, 30);
+    assert!(popup.contains("physical power"), "{popup}");
+    assert!(popup.contains("10s"), "{popup}");
+    let compact_popup = render_to_string(&dashboard, 80, 20);
+    assert!(compact_popup.contains("Unsaved work"), "{compact_popup}");
+    assert!(
+        compact_popup.contains("[y/Enter] confirm"),
+        "{compact_popup}"
+    );
+
+    assert!(dashboard.update(Event::Key(Key::Escape)).is_empty());
+    assert!(!dashboard.busy());
+    assert!(dashboard.update(Event::Key(Key::Reboot)).is_empty());
+    assert_eq!(
+        dashboard.update(Event::Key(Key::Enter)),
+        vec![Effect::Operate {
+            operation: Operation::Reboot,
+            target: "alpha".into(),
+        }]
+    );
+}
+
+#[test]
+fn outlet_is_visible_without_power_draw_and_progress_survives_status_polls() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::OperationProgress {
+        device: "alpha".into(),
+        detail: "holding power off for 10s".into(),
+        outlet_uncertain: true,
+    });
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Unreachable,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: None,
+        outlet: Some(OutletState::Off),
+        services: None,
+        error: None,
+    }));
+    let rendered = render_to_string(&dashboard, 120, 30);
+    assert!(rendered.contains("Outlet      off"), "{rendered}");
+    assert!(rendered.contains("holding power off for 10s"), "{rendered}");
+    assert!(!rendered.contains("Power draw"), "{rendered}");
+
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Unreachable,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: None,
+        outlet: Some(OutletState::On),
+        services: None,
+        error: None,
+    }));
+    assert!(render_to_string(&dashboard, 120, 30).contains("Outlet      on"));
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Unreachable,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: None,
+        outlet: Some(OutletState::Unknown),
+        services: None,
+        error: Some("Shelly unavailable".into()),
+    }));
+    assert!(render_to_string(&dashboard, 120, 30).contains("Outlet      unknown"));
+}
+
+#[test]
+fn power_cycle_confirmation_lists_devices_hidden_by_filter() {
+    let mut dashboard = Dashboard::from_config(&config());
+    dashboard.update(Event::Key(Key::Search));
+    for character in "alpha".chars() {
+        dashboard.update(Event::Key(Key::Char(character)));
+    }
+    dashboard.update(Event::Key(Key::Enter));
+    dashboard.update(Event::Key(Key::Left));
+    assert!(dashboard.update(Event::Key(Key::Reboot)).is_empty());
+    assert!(matches!(
+        dashboard.overlay(),
+        Overlay::Confirm { devices, .. } if devices == &["alpha", "beta"]
+    ));
 }
 
 #[test]
@@ -172,6 +274,7 @@ fn telemetry_samples_are_bounded_and_keep_service_and_status_details() {
             ram_total_bytes: Some(128 * 1024_u64.pow(3)),
             gpu_percent: Some((value / 2) as f64),
             watts: Some(100.0 + value as f64),
+            outlet: None,
             services: Some(vec![
                 DashboardService {
                     name: "sglang-main".into(),
@@ -213,6 +316,7 @@ fn polling_error_is_labeled_as_status_detail_not_operation_failure() {
         ram_total_bytes: None,
         gpu_percent: None,
         watts: None,
+        outlet: None,
         services: None,
         error: Some("Connection closed by alpha port 22".into()),
     }));
@@ -220,6 +324,62 @@ fn polling_error_is_labeled_as_status_detail_not_operation_failure() {
     let rendered = render_to_string(&dashboard, 120, 30);
     assert!(rendered.contains("Status detail: Connection closed by alpha port 22"));
     assert!(!rendered.contains("Recent failure"));
+}
+
+#[test]
+fn long_ssh_status_stays_below_graphs_without_moving_main_details() {
+    let mut dashboard = Dashboard::from_config(&config());
+    let sample = DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Unreachable,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: None,
+        outlet: None,
+        services: None,
+        error: None,
+    };
+    dashboard.update(Event::PollCompleted(sample.clone()));
+    let baseline = render_to_string(&dashboard, 120, 30);
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        error: Some("OpenSSH failed (exit Some(255)): ssh: Could not resolve hostname spark-301b.labs.tno.nl: nodename nor servname provided, or not known".into()),
+        ..sample
+    }));
+    let rendered = render_to_string(&dashboard, 120, 30);
+    let row_of = |text: &str, needle: &str| {
+        text.lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle:?}\n{text}"))
+    };
+
+    for needle in ["Device      alpha", "┌ RAM used", "┌ GPU busy"] {
+        assert_eq!(row_of(&baseline, needle), row_of(&rendered, needle));
+    }
+    assert!(
+        row_of(&rendered, "Status detail: OpenSSH failed") > row_of(&rendered, "┌ GPU busy"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("nodename nor servname"), "{rendered}");
+
+    dashboard.update(Event::PollCompleted(DashboardSample {
+        device: "alpha".into(),
+        state: DeviceState::Unreachable,
+        ram_percent: None,
+        ram_used_bytes: None,
+        ram_total_bytes: None,
+        gpu_percent: None,
+        watts: Some(1.3),
+        outlet: Some(OutletState::On),
+        services: None,
+        error: Some("SSH unavailable".into()),
+    }));
+    let with_power = render_to_string(&dashboard, 120, 35);
+    assert!(
+        row_of(&with_power, "Status detail: SSH unavailable") > row_of(&with_power, "┌ Power draw"),
+        "{with_power}"
+    );
 }
 
 #[test]
@@ -241,6 +401,7 @@ fn missing_secret_failure_remains_visible_with_unreachable_status_on_compact_ter
         ram_total_bytes: None,
         gpu_percent: None,
         watts: None,
+        outlet: None,
         services: None,
         error: Some("SSH connection timed out".into()),
     }));
@@ -299,6 +460,7 @@ fn stable_renderer_shows_master_detail_status_and_shortcuts() {
         ram_total_bytes: Some(128 * 1024_u64.pow(3)),
         gpu_percent: Some(87.6),
         watts: None,
+        outlet: None,
         services: Some(vec![
             DashboardService {
                 name: "sglang-main".into(),
@@ -370,6 +532,7 @@ fn percentage_history_uses_absolute_scale_near_capacity() {
         ram_total_bytes: None,
         gpu_percent: Some(96.0),
         watts: None,
+        outlet: None,
         services: None,
         error: None,
     }));
@@ -399,6 +562,7 @@ fn ram_history_falls_back_to_percentage_without_byte_telemetry() {
         ram_total_bytes: None,
         gpu_percent: None,
         watts: None,
+        outlet: None,
         services: None,
         error: None,
     }));
@@ -432,6 +596,7 @@ fn selected_device_status_uses_readable_cursor_foreground() {
         ram_total_bytes: None,
         gpu_percent: None,
         watts: None,
+        outlet: None,
         services: None,
         error: None,
     }));
@@ -471,6 +636,7 @@ fn power_details_and_history_appear_when_meter_data_exists() {
         ram_total_bytes: None,
         gpu_percent: None,
         watts: Some(118.4),
+        outlet: None,
         services: None,
         error: None,
     }));
