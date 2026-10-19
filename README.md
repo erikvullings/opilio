@@ -162,6 +162,26 @@ conventional VRAM. Service model extraction accepts strings and
 OpenAI-compatible model arrays, so a LiteLLM endpoint can expose all advertised
 models.
 
+## Devices behind a VPN
+
+If devices are only resolvable through a VPN, a VPN drop sends lookups to
+your local resolver, which answers "no such host". macOS caches that negative
+answer, so SSH (and Opilio) keep reporting `Could not resolve hostname` for a
+while after the VPN reconnects, even though the devices are up.
+
+On macOS, pin the VPN domain to the VPN's DNS servers with a per-domain
+resolver file, for example `/etc/resolver/lab.example.com`:
+
+```text
+nameserver 192.0.2.7
+nameserver 192.0.2.8
+```
+
+Off-VPN lookups then time out instead of being cached as missing, and names
+resolve again as soon as the VPN is back. Check it with
+`scutil --dns | grep -A3 lab.example.com`. To clear an already cached failure, run
+`sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`.
+
 ## Documentation
 
 - [User guide](docs/USER_GUIDE.md) — installation, full configuration, safety,
