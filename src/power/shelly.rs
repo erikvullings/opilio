@@ -2,7 +2,7 @@
 
 use std::{fmt, sync::Mutex, time::Duration};
 
-use diqwest::{DigestAuthSession, blocking::WithDigestAuth, session::DigestAuthCredentials};
+use diqwest::blocking::WithDigestAuth;
 use serde::Deserialize;
 use url::Url;
 
@@ -130,9 +130,13 @@ pub struct ReqwestHttpClient {
     auth: Mutex<Option<AuthSession>>,
 }
 
+// Digest sessions are deliberately not cached: diqwest's cached context drops the
+// challenge algorithm (Shelly Gen2+ requires SHA-256), so reused headers fall back to
+// MD5, fail authentication, and trip the Shelly's HTTP 429 lockout.
+#[derive(Clone, Copy)]
 enum AuthSession {
     Basic,
-    Digest(DigestAuthSession),
+    Digest,
 }
 
 impl fmt::Debug for ReqwestHttpClient {
@@ -162,6 +166,16 @@ impl ReqwestHttpClient {
                 auth: Mutex::new(None),
             })
             .map_err(|error| HttpError::Transport(error.to_string()))
+    }
+
+    fn send_digest(
+        builder: reqwest::blocking::RequestBuilder,
+        credentials: &ShellyCredentials,
+    ) -> Result<HttpResponse, HttpError> {
+        builder
+            .send_digest_auth((credentials.username(), credentials.password()))
+            .map_err(|error| HttpError::Transport(error.to_string()))
+            .and_then(Self::response)
     }
 
     fn response(response: reqwest::blocking::Response) -> Result<HttpResponse, HttpError> {
@@ -194,11 +208,8 @@ impl HttpClient for ReqwestHttpClient {
                     .map_err(map_reqwest_error)
                     .and_then(Self::response);
             }
-            Some(AuthSession::Digest(session)) => {
-                return builder
-                    .send_digest_auth(session)
-                    .map_err(|error| HttpError::Transport(error.to_string()))
-                    .and_then(Self::response);
+            Some(AuthSession::Digest) => {
+                return Self::send_digest(builder, credentials);
             }
             None => {}
         }
@@ -210,36 +221,21 @@ impl HttpClient for ReqwestHttpClient {
         if first.status() != reqwest::StatusCode::UNAUTHORIZED {
             return Self::response(first);
         }
-        let challenge = first
+        let digest = first
             .headers()
             .get(reqwest::header::WWW_AUTHENTICATE)
             .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        let response = if challenge
-            .get(..6)
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("digest"))
-        {
-            let session = DigestAuthSession::new(credentials.username(), credentials.password());
-            let host = Url::parse(request.url())
-                .ok()
-                .and_then(|url| url.host_str().map(str::to_owned))
-                .ok_or_else(|| HttpError::Transport("Shelly URL has no host".to_owned()))?;
-            (&session)
-                .store_context(&host, challenge)
-                .map_err(|error| HttpError::Transport(error.to_string()))?;
-            let response = builder
-                .send_digest_auth(&session)
-                .map_err(|error| HttpError::Transport(error.to_string()))?;
-            *auth = Some(AuthSession::Digest(session));
-            response
-        } else {
-            let response = builder
-                .basic_auth(credentials.username(), Some(credentials.password()))
-                .send()
-                .map_err(map_reqwest_error)?;
-            *auth = Some(AuthSession::Basic);
-            response
-        };
+            .and_then(|challenge| challenge.get(..6))
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("digest"));
+        if digest {
+            *auth = Some(AuthSession::Digest);
+            return Self::send_digest(builder, credentials);
+        }
+        let response = builder
+            .basic_auth(credentials.username(), Some(credentials.password()))
+            .send()
+            .map_err(map_reqwest_error)?;
+        *auth = Some(AuthSession::Basic);
         Self::response(response)
     }
 }
@@ -620,7 +616,7 @@ mod tests {
     use crate::config::Config;
 
     #[test]
-    fn digest_challenge_is_reused_for_subsequent_requests() {
+    fn digest_auth_keeps_sha256_challenge_algorithm_on_every_request() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -642,18 +638,25 @@ mod tests {
                     let length = stream.read(&mut request).unwrap();
                     let request = String::from_utf8_lossy(&request[..length]);
                     request_count.fetch_add(1, Ordering::Relaxed);
-                    let authenticated = request.lines().any(|line| {
-                        line.to_ascii_lowercase()
-                            .starts_with("authorization: digest")
+                    let authorization = request.lines().find_map(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower.starts_with("authorization: digest").then_some(lower)
                     });
-                    let response = if authenticated {
-                        authenticated_count.fetch_add(1, Ordering::Relaxed);
-                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
-                    } else {
-                        "HTTP/1.1 401 Unauthorized\r\n\
-                         WWW-Authenticate: Digest realm=\"shelly\", nonce=\"abc\", \
-                         algorithm=MD5, qop=\"auth\"\r\n\
-                         Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    let response = match authorization {
+                        Some(header) if header.contains("algorithm=sha-256") => {
+                            authenticated_count.fetch_add(1, Ordering::Relaxed);
+                            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                        }
+                        // Shelly answers repeated bad digest attempts with a lockout.
+                        Some(_) => {
+                            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        }
+                        None => {
+                            "HTTP/1.1 401 Unauthorized\r\n\
+                             WWW-Authenticate: Digest qop=\"auth\", realm=\"shelly\", \
+                             nonce=\"abc\", algorithm=SHA-256\r\n\
+                             Content-Length: 0\r\nConnection: close\r\n\r\n"
+                        }
                     };
                     stream.write_all(response.as_bytes()).unwrap();
                 }
@@ -682,7 +685,11 @@ devices:
         let credentials = ShellyCredentials::resolve(auth, |_| Some("secret".to_owned())).unwrap();
         let client = ReqwestHttpClient::new().unwrap();
 
-        for path in ["shelly", "rpc/Switch.GetStatus?id=0"] {
+        for path in [
+            "shelly",
+            "rpc/Switch.GetStatus?id=0",
+            "rpc/Switch.GetStatus?id=0",
+        ] {
             let response = client
                 .execute(HttpRequest::new(
                     format!("http://{address}/{path}"),
@@ -695,7 +702,7 @@ devices:
 
         stop.store(true, Ordering::Relaxed);
         server.join().unwrap();
-        assert_eq!(request_count.load(Ordering::Relaxed), 3);
-        assert_eq!(authenticated_count.load(Ordering::Relaxed), 2);
+        assert_eq!(authenticated_count.load(Ordering::Relaxed), 3);
+        assert_eq!(request_count.load(Ordering::Relaxed), 7);
     }
 }
