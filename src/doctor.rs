@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     io::{self, Write},
+    num::NonZeroUsize,
     time::Duration,
 };
 
@@ -14,7 +15,7 @@ use crate::{
     domain::{Device, PowerProvider as ConfiguredPowerProvider},
     history::Redactor,
     power::{
-        PowerAvailability, PowerProvider,
+        PowerAvailability, PowerProvider, PowerStatus,
         shelly::{ReqwestHttpClient as ShellyHttpClient, ShellyProvider},
         wol::{SystemUdpSender, WolProvider},
     },
@@ -30,6 +31,7 @@ use crate::{
 
 const SSH_TIMEOUT: Duration = Duration::from_secs(8);
 const POWER_TIMEOUT: Duration = Duration::from_secs(5);
+const POWER_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorRequest {
@@ -184,8 +186,22 @@ pub trait DoctorProbe: Sync {
     fn diagnose_device(&self, device_name: &str, device: &Device, config: &Config) -> DeviceProbe;
 }
 
-#[derive(Debug, Default)]
-pub struct SystemDoctorProbe;
+#[derive(Debug)]
+pub struct SystemDoctorProbe {
+    power_samples: NonZeroUsize,
+}
+
+impl SystemDoctorProbe {
+    pub const fn new(power_samples: NonZeroUsize) -> Self {
+        Self { power_samples }
+    }
+}
+
+impl Default for SystemDoctorProbe {
+    fn default() -> Self {
+        Self::new(NonZeroUsize::MIN)
+    }
+}
 
 impl DoctorProbe for SystemDoctorProbe {
     fn local_ssh(&self) -> Result<String, String> {
@@ -201,7 +217,7 @@ impl DoctorProbe for SystemDoctorProbe {
                 return DeviceProbe {
                     reachability: RuntimeObservation::unknown(error.to_string()),
                     ssh: RuntimeObservation::unavailable(error.to_string()),
-                    power: probe_power(device),
+                    power: probe_power(device, self.power_samples),
                     telemetry: device
                         .telemetry
                         .as_ref()
@@ -247,7 +263,7 @@ impl DoctorProbe for SystemDoctorProbe {
         DeviceProbe {
             reachability,
             ssh: ssh_observation,
-            power: probe_power(device),
+            power: probe_power(device, self.power_samples),
             telemetry,
             capabilities,
             services,
@@ -362,26 +378,11 @@ command -v systemctl >/dev/null 2>&1 && echo systemd=yes || echo systemd=no
     }
 }
 
-fn probe_power(device: &Device) -> Option<RuntimeObservation> {
+fn probe_power(device: &Device, samples: NonZeroUsize) -> Option<RuntimeObservation> {
     match &device.power {
         Some(ConfiguredPowerProvider::Shelly { .. }) => Some(
             match ShellyProvider::<ShellyHttpClient>::from_device(device, POWER_TIMEOUT) {
-                Ok(provider) => {
-                    let status = provider.status();
-                    match status.availability {
-                        PowerAvailability::Reachable => {
-                            RuntimeObservation::available("configured Shelly provider is reachable")
-                        }
-                        PowerAvailability::Unreachable => RuntimeObservation::unavailable(
-                            status
-                                .error
-                                .unwrap_or_else(|| "Shelly provider is unreachable".to_owned()),
-                        ),
-                        PowerAvailability::Unknown => {
-                            RuntimeObservation::unknown("Shelly availability is unknown")
-                        }
-                    }
-                }
+                Ok(provider) => sample_power(samples, POWER_SAMPLE_INTERVAL, || provider.status()),
                 Err(error) => RuntimeObservation::unavailable(error.to_string()),
             },
         ),
@@ -400,6 +401,49 @@ fn probe_power(device: &Device) -> Option<RuntimeObservation> {
         }
         None => None,
     }
+}
+
+fn sample_power(
+    samples: NonZeroUsize,
+    interval: Duration,
+    mut status: impl FnMut() -> PowerStatus,
+) -> RuntimeObservation {
+    let total = samples.get();
+    let mut failures = Vec::new();
+    let mut unknown = 0;
+    for sample in 0..total {
+        if sample > 0 {
+            std::thread::sleep(interval);
+        }
+        let status = status();
+        match status.availability {
+            PowerAvailability::Reachable => {}
+            PowerAvailability::Unreachable => failures.push(
+                status
+                    .error
+                    .unwrap_or_else(|| "Shelly provider is unreachable".to_owned()),
+            ),
+            PowerAvailability::Unknown => unknown += 1,
+        }
+    }
+    if let Some(first) = failures.first() {
+        return RuntimeObservation::unavailable(if total == 1 {
+            first.clone()
+        } else {
+            format!(
+                "{} of {total} Shelly samples failed; first: {first}",
+                failures.len()
+            )
+        });
+    }
+    if unknown == total {
+        return RuntimeObservation::unknown("Shelly availability is unknown");
+    }
+    RuntimeObservation::available(if total == 1 {
+        "configured Shelly provider is reachable".to_owned()
+    } else {
+        format!("configured Shelly provider is reachable ({total} samples)")
+    })
 }
 
 fn probe_services(ssh: &OpenSsh, device: &Device, config: &Config) -> Vec<ServiceObservation> {
@@ -855,5 +899,48 @@ const fn status_name(status: CheckStatus) -> &'static str {
         CheckStatus::Warning => "warning",
         CheckStatus::Fail => "fail",
         CheckStatus::Skipped => "skipped",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::power::{ElectricalTelemetry, OutletState};
+
+    fn status(error: Option<&str>) -> PowerStatus {
+        PowerStatus {
+            availability: if error.is_some() {
+                PowerAvailability::Unreachable
+            } else {
+                PowerAvailability::Reachable
+            },
+            outlet: OutletState::On,
+            telemetry: ElectricalTelemetry::unknown(),
+            error: error.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn repeated_power_samples_report_intermittent_failures() {
+        let mut responses = [None, Some("HTTP 429"), None].into_iter();
+        let observation = sample_power(NonZeroUsize::new(3).unwrap(), Duration::ZERO, || {
+            status(responses.next().unwrap())
+        });
+        assert_eq!(
+            observation,
+            RuntimeObservation::unavailable("1 of 3 Shelly samples failed; first: HTTP 429")
+        );
+    }
+
+    #[test]
+    fn single_power_sample_keeps_existing_wording() {
+        assert_eq!(
+            sample_power(NonZeroUsize::MIN, Duration::ZERO, || status(None)),
+            RuntimeObservation::available("configured Shelly provider is reachable")
+        );
+        assert_eq!(
+            sample_power(NonZeroUsize::MIN, Duration::ZERO, || status(Some("down"))),
+            RuntimeObservation::unavailable("down")
+        );
     }
 }

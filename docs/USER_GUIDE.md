@@ -73,6 +73,7 @@ check:
 ```sh
 opilio doctor all
 opilio doctor lab --json
+opilio doctor lab --power-samples 6   # poll each Shelly for a minute
 opilio status all
 ```
 
@@ -251,8 +252,27 @@ the whole bundle before writing and keeps managed SSH entries under
   test the configured alias with `ssh <alias>`.
 - **A whole site is unreachable:** establish its VPN/network route, then run
   `opilio doctor <site>` or press `R`; Opilio does not manage VPNs.
+- **`Could not resolve hostname` after a VPN drop:** while the VPN is down,
+  lookups for its domain go to your local resolver, which answers "no such
+  host". macOS caches that answer, so names keep failing after the VPN
+  reconnects. Confirm with `host <name>` (queries DNS directly) and SSH by IP.
+  Clear the cache with
+  `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`. To prevent
+  it, pin the domain to the VPN's DNS servers with a file named after the
+  domain in `/etc/resolver/` (for example `/etc/resolver/lab.example.com`)
+  containing one `nameserver <ip>` line per server; check it with
+  `scutil --dns`.
 - **Shelly unavailable:** verify controller routing, device generation/auth,
   and the referenced environment variable.
+- **Shelly HTTP 429:** Gen2+ plugs lock out clients after failed digest
+  authentication. Run `opilio doctor <target> --power-samples 6` to poll each
+  plug for a minute; any failed sample is reported.
+- **A device was found powered off unexpectedly:** check the plug's uptime and
+  reset reason (`/rpc/Sys.GetStatus`) against the device's last journal entry
+  (`journalctl -b -1 -n 20`). Shelly firmware can crash under network
+  vulnerability scans and power up with the relay off. Update the plug's
+  firmware and set its power-on default to restore the last state
+  (`Switch.SetConfig` with `initial_state: restore_last`).
 - **WoL does not wake:** verify firmware WoL support and use the subnet's
   directed broadcast if the default broadcast is filtered.
 - **Scheduled job fails:** use an absolute config, ensure scheduler-visible

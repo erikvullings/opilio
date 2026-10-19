@@ -10,7 +10,7 @@ Prevent authenticated Shelly Gen3 plugs from rate-limiting TUI status polling.
 
 ## Context
 
-Both Lab Shelly plugs return HTTP 429 while the TUI is running. A direct request loop reproduces alternating 401 and 429 responses. `ReqwestHttpClient` first sends an unauthenticated request to inspect the challenge and then calls `diqwest::send_digest_auth`, which performs its own unauthenticated challenge request. Each provider sample reads both `/shelly` and `Switch.GetStatus`, producing up to six requests every two seconds. The initial fix reduced that to three, but review revealed that the TUI recreated the provider every poll and discarded both the cached API generation and digest session.
+Both lab Shelly plugs return HTTP 429 while the TUI is running. A direct request loop reproduces alternating 401 and 429 responses. `ReqwestHttpClient` first sends an unauthenticated request to inspect the challenge and then calls `diqwest::send_digest_auth`, which performs its own unauthenticated challenge request. Each provider sample reads both `/shelly` and `Switch.GetStatus`, producing up to six requests every two seconds. The initial fix reduced that to three, but review revealed that the TUI recreated the provider every poll and discarded both the cached API generation and digest session.
 
 ## Requirements
 
@@ -31,7 +31,7 @@ Both Lab Shelly plugs return HTTP 429 while the TUI is running. A direct request
 
 ## Progress
 
-- [x] Reproduced HTTP 429 against both live Lab plugs.
+- [x] Reproduced HTTP 429 against both live lab plugs.
 - [x] Identified duplicate digest challenge requests in `ReqwestHttpClient`.
 - [x] Regression test captures the corrected request count.
 - [x] Implementation completed.
@@ -41,18 +41,23 @@ Both Lab Shelly plugs return HTTP 429 while the TUI is running. A direct request
 
 ## Validation
 
-- Direct burst probes reproduced HTTP 429 on `192.0.2.51` and `192.0.2.117`.
+- Direct burst probes reproduced HTTP 429 on two plugs.
 - `digest_challenge_is_reused_for_subsequent_requests` observes three total requests for two authenticated endpoints.
 - `cargo test --quiet --all-targets --all-features` — passed.
 - `cargo clippy --quiet --all-targets --all-features -- -D warnings` — passed.
 - `cargo fmt --check` — passed.
-- Two live `doctor lab` runs reported both Shelly providers reachable.
+- Two live `doctor <site>` runs reported both Shelly providers reachable.
 - Six live one-shot power checks at two-second intervals completed with zero failures, but did not exercise persistent TUI provider reuse.
 - The persistent TUI retains one provider per device, preserving generation and digest caches across polls.
 - A rebuilt persistent TUI still showed intermittent 429 responses, proving one authenticated request every one to two seconds remains too frequent for these Shelly Gen3 units.
 - Power observations now have an independent 10-second cache, reducing steady-state traffic to one authenticated request per device every 10 seconds.
 - A transient startup 429 preserves the last good observation or remains silent while retrying; a persistent limiter problem is reported after three consecutive checks.
 - The final rebuilt TUI was observed for at least 45 seconds with no Shelly warning at startup or during steady state.
+
+## Correction
+
+The root cause was misdiagnosed here: HTTP 429 came from MD5-signed reused
+digest requests, not request volume. See task 0031.
 
 ## Blockers / decisions needed
 

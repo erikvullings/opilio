@@ -162,26 +162,6 @@ conventional VRAM. Service model extraction accepts strings and
 OpenAI-compatible model arrays, so a LiteLLM endpoint can expose all advertised
 models.
 
-## Devices behind a VPN
-
-If devices are only resolvable through a VPN, a VPN drop sends lookups to
-your local resolver, which answers "no such host". macOS caches that negative
-answer, so SSH (and Opilio) keep reporting `Could not resolve hostname` for a
-while after the VPN reconnects, even though the devices are up.
-
-On macOS, pin the VPN domain to the VPN's DNS servers with a per-domain
-resolver file, for example `/etc/resolver/lab.example.com`:
-
-```text
-nameserver 192.0.2.7
-nameserver 192.0.2.8
-```
-
-Off-VPN lookups then time out instead of being cached as missing, and names
-resolve again as soon as the VPN is back. Check it with
-`scutil --dns | grep -A3 lab.example.com`. To clear an already cached failure, run
-`sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`.
-
 ## Documentation
 
 - [User guide](docs/USER_GUIDE.md) — installation, full configuration, safety,
@@ -204,7 +184,7 @@ CI runs these checks and builds optimized release binaries on Linux, macOS,
 and Windows.
 
 <details>
-<summary>Implementation status — 30 / 30 tasks done</summary>
+<summary>Implementation status — 31 / 31 tasks done</summary>
 
 | Task | Status | Depends on | Outcome |
 |---|---|---|---|
@@ -238,5 +218,6 @@ and Windows.
 | [0028 Show missing secrets in TUI](TASKS/0028-show-missing-secrets-in-tui.md) | done | 0021, 0022 | Make missing environment secrets visible in device details |
 | [0029 TUI recovery cycle and outlet state](TASKS/0029-tui-recovery-cycle-and-outlet-state.md) | done | 0008, 0011, 0012, 0028 | Recover stuck Shelly devices with staged power control |
 | [0030 Keep TUI details below graphs](TASKS/0030-keep-tui-details-below-graphs.md) | done | 0028, 0029 | Keep summary layout stable while surfacing errors |
+| [0031 Fix Shelly digest algorithm](TASKS/0031-fix-shelly-digest-algorithm.md) | done | 0022 | SHA-256 digest per request; doctor power sampling |
 
 </details>

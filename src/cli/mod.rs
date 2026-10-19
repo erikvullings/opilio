@@ -120,6 +120,9 @@ pub enum Command {
         /// Suppress diagnostic output; use the exit code only.
         #[arg(long, conflicts_with = "json")]
         quiet: bool,
+        /// Probe each Shelly plug N times, 10 seconds apart, to expose intermittent failures such as HTTP 429.
+        #[arg(long, default_value = "1", value_name = "N")]
+        power_samples: NonZeroUsize,
     },
     /// Inspect and validate configuration.
     Config {

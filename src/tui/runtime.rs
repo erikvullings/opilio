@@ -93,13 +93,11 @@ struct CachedPowerProvider {
 #[derive(Default)]
 struct PowerObservationCache {
     last: Option<(Instant, PowerObservation)>,
-    consecutive_rate_limits: usize,
 }
 
 impl PowerObservationCache {
     fn defer(&mut self, now: Instant) {
         self.last = Some((now, (OutletState::Unknown, None, None)));
-        self.consecutive_rate_limits = 0;
     }
 
     fn observe(
@@ -113,28 +111,6 @@ impl PowerObservationCache {
             return observation.clone();
         }
         let observation = fetch();
-        let rate_limited = observation
-            .2
-            .as_deref()
-            .is_some_and(|error| error.contains("HTTP 429"));
-        if rate_limited {
-            self.consecutive_rate_limits = self.consecutive_rate_limits.saturating_add(1);
-            if let Some((_, previous)) = &self.last
-                && (previous.0 != OutletState::Unknown || previous.1.is_some())
-                && previous.2.is_none()
-            {
-                let previous = previous.clone();
-                self.last = Some((now, previous.clone()));
-                return previous;
-            }
-            if self.consecutive_rate_limits < 3 {
-                let pending = (OutletState::Unknown, None, None);
-                self.last = Some((now, pending.clone()));
-                return pending;
-            }
-        } else {
-            self.consecutive_rate_limits = 0;
-        }
         self.last = Some((now, observation.clone()));
         observation
     }
@@ -1387,10 +1363,10 @@ mod tests {
     }
 
     #[test]
-    fn power_observations_are_rate_limited_and_keep_last_good_value_on_429() {
+    fn power_observations_are_cached_for_the_poll_interval_and_report_errors() {
         let started = Instant::now();
         let good = (OutletState::On, Some(42.0), None);
-        let rate_limited = (
+        let failed = (
             OutletState::Unknown,
             None,
             Some("Shelly request returned HTTP 429".to_owned()),
@@ -1405,43 +1381,8 @@ mod tests {
             good
         );
         assert_eq!(
-            cache.observe(started + Duration::from_secs(10), || rate_limited),
-            good
-        );
-        assert_eq!(
-            cache.observe(started + Duration::from_secs(19), || {
-                panic!("429 backoff should remain cached")
-            }),
-            good
-        );
-    }
-
-    #[test]
-    fn transient_startup_rate_limits_are_hidden_but_persistent_ones_are_reported() {
-        let started = Instant::now();
-        let rate_limited = || {
-            (
-                OutletState::Unknown,
-                None,
-                Some("Shelly request returned HTTP 429".to_owned()),
-            )
-        };
-        let mut cache = PowerObservationCache::default();
-
-        assert_eq!(
-            cache.observe(started, rate_limited),
-            (OutletState::Unknown, None, None)
-        );
-        assert_eq!(
-            cache.observe(started + Duration::from_secs(10), rate_limited),
-            (OutletState::Unknown, None, None)
-        );
-        assert_eq!(
-            cache
-                .observe(started + Duration::from_secs(20), rate_limited)
-                .2
-                .as_deref(),
-            Some("Shelly request returned HTTP 429")
+            cache.observe(started + Duration::from_secs(10), || failed.clone()),
+            failed
         );
     }
 

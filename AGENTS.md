@@ -32,11 +32,9 @@ Use exactly: `open`, `in-progress`, `blocked`, `done`.
 
 Prefer vertical/tracer-bullet tasks that leave a demonstrable capability rather than layer-only work. Keep CLI, TUI, scheduler, and tests behind shared library APIs. Test stable seams. Never log or export resolved secrets. Treat JSON output as a public compatibility surface.
 
-## Diagnosing the live flock
+## Diagnosing live devices
 
-The Sparks (`*.lab.example.com`) are only reachable on the user's VPN. `Could not resolve hostname` usually means the VPN dropped or macOS cached a negative DNS answer, not that the device is down. `/etc/resolver/lab.example.com` pins that domain to the VPN DNS servers (see README "Devices behind a VPN"). Confirm with `host <name>` and SSH by IP before suspecting the device; a cache flush needs the user's sudo.
-
-Shelly Gen2+ plugs require SHA-256 digest auth and answer repeated failed auth with HTTP 429 lockouts. Do not reintroduce cached digest sessions (diqwest drops the algorithm on reuse); see `src/power/shelly.rs`.
+Before blaming Opilio for an unreachable device or a Shelly error, read the Troubleshooting section of `docs/USER_GUIDE.md`; it covers VPN DNS caching, Shelly HTTP 429, and plugs that power up off.
 
 ## GitHub CLI
 

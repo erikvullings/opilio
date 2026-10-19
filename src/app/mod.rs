@@ -110,19 +110,9 @@ pub struct NameListing {
 
 /// Executes a parsed CLI invocation against shared application APIs.
 pub fn execute(cli: Cli, output: &mut dyn Write) -> Result<ExitStatus, AppError> {
-    let doctor = SystemDoctorProbe;
     let status = RuntimeStatusSource::default();
     execute_with_adapters(
-        cli,
-        output,
-        &status,
-        Some(&doctor),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        cli, output, &status, None, None, None, None, None, None, None,
     )
 }
 
@@ -133,13 +123,12 @@ pub fn execute_with_history(
     source: OperationSource,
     history: &HistoryStore,
 ) -> Result<ExitStatus, AppError> {
-    let doctor = SystemDoctorProbe;
     let status = RuntimeStatusSource::default();
     execute_with_adapters(
         cli,
         output,
         &status,
-        Some(&doctor),
+        None,
         None,
         None,
         None,
@@ -347,7 +336,7 @@ fn execute_with_adapters(
             quiet,
         } => {
             let (user_ssh_config, owned_ssh_config) = default_ssh_paths()?;
-            let system_probe = SystemDoctorProbe;
+            let system_probe = SystemDoctorProbe::default();
             let probe = doctor_probe.unwrap_or(&system_probe);
             let report = import_bundle(
                 &ImportRequest {
@@ -521,9 +510,10 @@ fn execute_with_adapters(
             target,
             json,
             quiet,
+            power_samples,
         } => {
             let config = Config::load(&path)?;
-            let system_probe = SystemDoctorProbe;
+            let system_probe = SystemDoctorProbe::new(power_samples);
             let probe = doctor_probe.unwrap_or(&system_probe);
             let report = collect_doctor(
                 &config,
